@@ -1,9 +1,7 @@
 Herhangi bir sorun veya soru için mehmetalixdxd@gmail.com
-Herhangi bir sorun veya soru için mehmetalixdxd@gmail.com
-Herhangi bir sorun veya soru için mehmetalixdxd@gmail.com
+
 For any issues or questions, please contact mehmetalixdxd@gmail.com
-For any issues or questions, please contact mehmetalixdxd@gmail.com
-For any issues or questions, please contact mehmetalixdxd@gmail.com
+
 
 # EVM Ingestion Pipeline
 
