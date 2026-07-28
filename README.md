@@ -3,7 +3,7 @@ Herhangi bir sorun veya soru için mehmetalixdxd@gmail.com
 Herhangi bir sorun veya soru için mehmetalixdxd@gmail.com
 Herhangi bir sorun veya soru için mehmetalixdxd@gmail.com
 Herhangi bir sorun veya soru için mehmetalixdxd@gmail.com
-
+Herhangi bir sorun veya soru için mehmetalixdxd@gmail.com
 
 # EVM Ingestion Pipeline
 
