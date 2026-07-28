@@ -1,0 +1,102 @@
+services:
+  kafka:
+    image: apache/kafka:4.3.1
+    hostname: kafka
+    container_name: evm-kafka
+    ports:
+      - "9092:9092"
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+
+      KAFKA_LISTENERS: >-
+        INTERNAL://0.0.0.0:19092,
+        EXTERNAL://0.0.0.0:9092,
+        CONTROLLER://0.0.0.0:9093
+
+      KAFKA_ADVERTISED_LISTENERS: >-
+        INTERNAL://kafka:19092,
+        EXTERNAL://localhost:9092
+
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: >-
+        INTERNAL:PLAINTEXT,
+        EXTERNAL:PLAINTEXT,
+        CONTROLLER:PLAINTEXT
+
+      KAFKA_INTER_BROKER_LISTENER_NAME: INTERNAL
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+
+    restart: unless-stopped
+
+  redis:
+    image: redis:7.4.10-alpine3.21
+    container_name: evm-redis
+    command: ["redis-server", "--appendonly", "yes"]
+    ports:
+      - "6379:6379"
+
+             # Container silinse bile Redis verisi Docker volume içinde kalır.
+    volumes:
+      - redis_data:/data
+
+    restart: unless-stopped
+
+  ingestion:
+    build:
+      context: ./ingestion-service
+      dockerfile: Dockerfile
+    container_name: evm-ingestion
+    env_file:
+      - .env
+    environment:
+      KAFKA_BOOTSTRAP_SERVERS: kafka:19092
+      REDIS_URL: redis://redis:6379/0
+    ports:
+      - "8000:8000"
+    depends_on:
+      - kafka
+      - redis
+
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request; urllib.request.urlopen('http://localhost:8000/health', timeout=3)"
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+
+    restart: unless-stopped
+  clickhouse:
+    image: clickhouse/clickhouse-server:26.5.6
+    container_name: evm-clickhouse
+    ports:
+      - "8123:8123"             # http bağlantısı
+      - "9000:9000"             # clickhouse native bağlantısı
+
+    environment:
+      CLICKHOUSE_DB: evm
+      CLICKHOUSE_USER: evm_userMehmet
+      CLICKHOUSE_PASSWORD: evm_passMehmet
+      CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: "1"
+
+    volumes:
+      - clickhouse_data:/var/lib/clickhouse
+      - ./docker/clickhouse/init:/docker-entrypoint-initdb.d:ro
+
+    restart: unless-stopped
+
+  
+  
+
+volumes:
+  redis_data:
+  clickhouse_data:
