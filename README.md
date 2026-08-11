@@ -1,104 +1,308 @@
-Herhangi bir sorun veya soru için mehmetalixdxd@gmail.com
+EVM Ingestion Pipeline
 
-For any issues or questions, please contact mehmetalixdxd@gmail.com
+BSC gibi EVM tabanlı blockchain ağlarından canlı blok ve log verilerini alan, ham veriyi Kafka üzerinden işleyen, normalize eden, re-org/idempotency kontrolünden geçirerek canonical event üreten asenkron veri hattı.
 
+Bu proje staj kapsamında geliştirilen EVM Tabanlı Canlı Veri Akış ve İzolasyon Hattı projesidir.
 
-# EVM Ingestion Pipeline
+Şu anda Sprint 1 ve Sprint 2 kapsamındaki ana veri hattı çalışmaktadır.
 
-BSC gibi EVM tabanlı blockchain ağlarından canlı blok ve log verilerini alan, eksik blokları tamamlayan ve ham verileri Kafka kuyruğuna gönderen asenkron veri toplama servisi.
+Mevcut Veri Akışı
 
-Bu proje staj kapsamında geliştirilen **EVM Tabanlı Canlı Veri Akış ve İzolasyon Hattı** projesinin Sprint 1 çalışmasıdır.
+BSC WebSocket + HTTP RPC
+          |
+          v
+   Ingestion Service
+          |
+          v
+      Kafka: evm.raw
+          |
+          v
+   Normalizer Service
+          |
+          +---------------------> Kafka: evm.dlq
+          |
+          v
+ Kafka: evm.normalized
+          |
+          v
+ Re-org / Idempotency Service
+          |
+          +---------------------> Kafka: evm.dlq
+          |
+          v
+ Kafka: canonical-events
+          |
+          v
+   Batch Writer [sonraki sprint]
+          |
+          v
+      ClickHouse
 
----
+Sprint 1
 
-## Sprint 1 Amacı
+Sprint 1 kapsamında EVM ağından canlı veri toplayan ingestion katmanı tamamlandı.
 
-Sprint 1 kapsamında tüm mikroservislerin tamamlanması değil, aşağıdaki çekirdek veri hattının çalışan ve izlenebilir hâle getirilmesi amaçlanmıştır:
+Tamamlanan özellikler
 
-```text
-EVM RPC Provider
-        ↓
+BSC HTTP RPC bağlantısı
+
+BSC WebSocket bağlantısı
+
+newHeads ve logs abonelikleri
+
+Tam blok ve transaction bilgilerinin HTTP RPC ile alınması
+
+Kafka evm.raw topic'ine ham veri gönderimi
+
+Kafka idempotent producer
+
+Redis checkpoint yönetimi
+
+Gap detection
+
+HTTP backfill
+
+HTTP 429 rate-limit kontrolü
+
+Retry-After desteği
+
+Exponential backoff ve jitter
+
+WebSocket reconnect
+
+Block ve log için ayrı bounded queue
+
+Backpressure
+
+Ardışık blok kontrolü
+
+Health, readiness ve Prometheus metrics endpoint'leri
+
+ClickHouse başlangıç DDL'leri
+
+ReplacingMergeTree(version) tabloları
+
+Sprint 2
+
+Sprint 2 kapsamında Normalizer Service ile Re-org / Idempotency Service tamamlandı.
+
+Normalizer Service
+
+evm.raw topic'ini tüketir ve ham kayıtları standart event formatına dönüştürür.
+
+Bir tam blok mesajı:
+
+1 block event
++
+N transaction event
+
+üretir.
+
+Log mesajı ise bir log event üretir.
+
+Desteklenen event tipleri:
+
+block
+transaction
+log
+
+Normalize edilen her event aşağıdaki temel alanlara sahiptir:
+
+schema_version
+event_id
+event_type
+chain_id
+block_number
+block_hash
+normalized_at
+payload
+
+Mevcut schema version:
+
+1
+
+Deterministik Event ID
+
+Event ID değerleri SHA-256 ile deterministik olarak üretilir.
+
+block:
+SHA256(block|chain_id|block_hash)
+
+transaction:
+SHA256(transaction|chain_id|block_hash|transaction_hash)
+
+log:
+SHA256(log|chain_id|block_hash|transaction_hash|log_index)
+
+Aynı blockchain event'i tekrar işlendiğinde aynı event_id oluşur.
+
+Veri dönüşümleri
+
+Normalizer aşağıdaki dönüşümleri uygular:
+
+Hexadecimal sayıları integer'a dönüştürme
+
+Integer değerleri gerektiğinde string olarak saklama
+
+Hex string'leri normalize etme
+
+Timestamp değerlerini UTC ISO formata çevirme
+
+Boolean alanlarını doğrulama
+
+Zorunlu alanları doğrulama
+
+Geçersiz kayıtlar evm.dlq topic'ine gönderilir.
+
+DLQ
+
+Hatalı mesajlarda aşağıdaki bilgiler tutulur:
+
+schema_version
+source_service
+source_topic
+source_partition
+source_offset
+error_type
+error_reason
+failed_at
+original_message
+
+Offset yalnızca başarılı output veya DLQ gönderiminden sonra commit edilir.
+
+Re-org ve Idempotency
+
+Re-org Service evm.normalized topic'ini tüketir.
+
+Block event'lerinde:
+
+parent_hash
+
+değeri son canonical block'un:
+
+block_hash
+
+değeriyle karşılaştırılır.
+
+Normal devam eden zincirde event:
+
+canonical=true
+version=1
+
+olarak yayınlanır.
+
+Re-org oluştuğunda eski canonical event'ler yeni versiyonla:
+
+canonical=false
+version=N+1
+
+olarak yayınlanır.
+
+Yeni canonical zincir event'leri ise:
+
+canonical=true
+
+olarak yayınlanır.
+
+Duplicate kontrolü
+
+Aynı event_id aynı canonical state ile tekrar gelirse:
+
+yeni version oluşturulmaz
+
+canonical-events topic'ine tekrar gönderilmez
+
+duplicate metriği artırılır
+
+Redis state
+
+Re-org state Redis üzerinde tutulur.
+
+Önemli key örnekleri:
+
+reorg:head:{chain_id}
+reorg:event:{event_id}
+reorg:block:{chain_id}:{block_number}
+reorg:block-hash:{chain_id}:{block_hash}
+reorg:block-events:{chain_id}:{block_hash}
+reorg:block-index:{chain_id}
+reorg:pending:{chain_id}:{block_hash}
+
+Re-org window:
+
+50 block
+
+Block event gelmeden önce ulaşan transaction/log event'leri pending durumda tutulabilir.
+
+Pending TTL:
+
+120 saniye
+
+Kafka Topic'leri
+
+evm.raw
+
+Producer:
+
 Ingestion Service
-        ↓
-Kafka: evm.raw
-```
 
-Bu sprintte ClickHouse tabloları hazırlanmıştır ancak Ingestion Service doğrudan ClickHouse’a veri yazmaz.
+Consumer:
 
----
+Normalizer Service
 
-## Mevcut Veri Akışı
+Kafka key:
 
-```text
-BSC WebSocket
-├── newHeads aboneliği
-│   └── HTTP RPC ile tam blok ve transaction bilgileri alınır
-│       └── Block Queue
-│           └── Kafka: evm.raw
-│               └── Redis checkpoint güncellenir
-│
-└── logs aboneliği
-    └── Log Queue
-        └── Kafka: evm.raw
-```
+chain_id
 
-Servis başlatıldığında Redis üzerindeki son başarılı checkpoint okunur.
+evm.normalized
 
-Checkpoint ile güncel blok arasında eksik blok varsa HTTP RPC kullanılarak backfill işlemi yapılır. Eksik bloklar sırayla Kafka’ya gönderildikten sonra canlı WebSocket akışına geçilir.
+Producer:
 
----
+Normalizer Service
 
-## Tamamlanan Özellikler
+Consumer:
 
-- BSC HTTP RPC bağlantısı
-- BSC WebSocket bağlantısı
-- Canlı blok başlıklarını dinleme
-- Canlı blockchain loglarını dinleme
-- HTTP RPC üzerinden tam blok verisi alma
-- Transaction detaylarını blok verisiyle birlikte alma
-- Kafka `evm.raw` topic’ine ham veri gönderme
-- Kafka idempotent producer
-- Redis checkpoint yönetimi
-- Gap detection
-- HTTP backfill
-- WebSocket bağlantı kopmalarında yeniden bağlanma
-- Exponential backoff
-- Jitter
-- HTTP 429 rate-limit kontrolü
-- `Retry-After` desteği
-- Bloklar ve loglar için ayrı bounded queue
-- Backpressure
-- Ardışık blok kontrolü
-- Health endpoint
-- Readiness endpoint
-- Prometheus metrics endpoint
-- Docker healthcheck
-- ClickHouse DDL scriptleri
-- `ReplacingMergeTree(version)` tabloları
+Re-org Service
 
----
+Kafka key:
 
-## Kullanılan Teknolojiler
+chain_id
 
-- Python 3.14
-- asyncio
-- aiohttp
-- websockets
-- aiokafka
-- redis-py
-- prometheus-client
-- Apache Kafka
-- Redis
-- ClickHouse
-- Docker
-- Docker Compose
-- BSC JSON-RPC
+canonical-events
 
----
+Producer:
 
-## Proje Yapısı
+Re-org Service
 
-```text
+Kafka key:
+
+event_id
+
+Mesajlara eklenen alanlar:
+
+canonical
+version
+
+evm.dlq
+
+Normalizer veya Re-org tarafından işlenemeyen kayıtlar için kullanılır.
+
+At-Least-Once Yaklaşımı
+
+Normalizer ve Re-org consumer'larında:
+
+enable_auto_commit=False
+
+kullanılır.
+
+Offset yalnızca mesaj başarılı biçimde işlendikten sonra manuel olarak commit edilir.
+
+Bu yapı veri kaybı yerine gerektiğinde tekrar işlemeyi tercih eder.
+
+Deterministik event_id, duplicate kontrolü ve version mantığı tekrar işlemenin etkisini sınırlar.
+
+Proje Yapısı
+
 evm-ingestion-pipeline/
 ├── docker/
 │   └── clickhouse/
@@ -107,684 +311,359 @@ evm-ingestion-pipeline/
 │
 ├── ingestion-service/
 │   ├── app/
-│   │   ├── common/
-│   │   │   └── backoff.py
-│   │   ├── kafka/
-│   │   │   └── producer.py
-│   │   ├── monitoring/
-│   │   │   ├── metrics.py
-│   │   │   └── server.py
-│   │   ├── rpc/
-│   │   │   ├── http_client.py
-│   │   │   └── websocket_client.py
-│   │   ├── services/
-│   │   │   └── ingestion.py
-│   │   ├── storage/
-│   │   │   ├── checkpoint.py
-│   │   │   └── redis_client.py
-│   │   ├── main.py
-│   │   └── settings.py
-│   │
 │   ├── scripts/
-│   │   ├── dev/
-│   │   │   └── set_test_checkpoint.py
-│   │   └── manual/
-│   │       ├── checkpoint_test.py
-│   │       ├── http_429_test.py
-│   │       ├── ingestion_test.py
-│   │       ├── kafka_payload_test.py
-│   │       ├── kafka_tests.py
-│   │       ├── logs_test.py
-│   │       ├── redis_test.py
-│   │       ├── rpc_test.py
-│   │       └── websocket_test.py
-│   │
 │   ├── Dockerfile
-│   ├── requirements.txt
-│   └── .dockerignore
+│   └── requirements.txt
 │
-├── .env
+├── normalizer-service/
+│   ├── app/
+│   │   ├── kafka/
+│   │   ├── monitoring/
+│   │   └── normalizer/
+│   ├── scripts/
+│   │   └── manual/
+│   │       └── normalizer_smoke_test.py
+│   ├── Dockerfile
+│   └── requirements.txt
+│
+├── reorg-service/
+│   ├── app/
+│   │   ├── kafka/
+│   │   ├── monitoring/
+│   │   ├── reorg/
+│   │   └── state/
+│   ├── Dockerfile
+│   └── requirements.txt
+│
+├── scripts/
+│   └── manual/
+│       └── reorg_simulation_test.py
+│
 ├── .env.example
-├── .gitignore
 ├── docker-compose.yml
 └── README.md
-```
 
----
+Kullanılan Teknolojiler
 
-## Ortam Değişkenleri
+Python 3.14
 
-Proje kökünde `.env` dosyası bulunmalıdır.
+asyncio
 
-Örnek yapı:
+aiohttp
 
-```env
-# EVM Network
+websockets
+
+aiokafka
+
+redis-py
+
+pydantic
+
+prometheus-client
+
+Apache Kafka
+
+Redis
+
+ClickHouse
+
+Docker
+
+Docker Compose
+
+BSC JSON-RPC
+
+Ortam Değişkenleri
+
+Gerçek RPC adresleri ve API anahtarları yalnızca .env dosyasında tutulmalıdır.
+
+Örnek:
+
 CHAIN_NAME=bsc
 CHAIN_ID=56
 
-# RPC Providers
-HTTP_RPC_URL=https://bsc-dataseed.bnbchain.org
-WS_RPC_URL=wss://your-bsc-websocket-endpoint
+HTTP_RPC_URL=
+WS_RPC_URL=
 
-# Kafka
 KAFKA_BOOTSTRAP_SERVERS=localhost:9092
 KAFKA_TOPIC=evm.raw
 
-# Redis
 REDIS_URL=redis://localhost:6379/0
 
-# Queue Limits
 BLOCK_QUEUE_MAX_SIZE=500
 LOG_QUEUE_MAX_SIZE=5000
 
-# Monitoring
-MONITORING_PORT=8000
-```
+.env Git deposuna gönderilmemelidir.
 
-Gerçek RPC anahtarları yalnızca `.env` dosyasında tutulmalıdır.
+.env.example gerçek secret içermemelidir.
 
-`.env` dosyası Git deposuna gönderilmemelidir.
+Docker ile Çalıştırma
 
----
+Proje kökünde:
 
-## Docker ile Çalıştırma
-
-Proje köküne geçin:
-
-```powershell
 cd C:\Users\mehmet\Desktop\evm-ingestion-pipeline
-```
-
-Tüm servisleri başlatın:
-
-```powershell
 docker compose up -d --build
-```
 
-Container durumlarını kontrol edin:
+Container durumları:
 
-```powershell
 docker compose ps
-```
 
-Beklenen servisler:
+Beklenen ana servisler:
 
-```text
 evm-kafka
 evm-redis
 evm-clickhouse
 evm-ingestion
-```
+evm-normalizer
+evm-reorg
 
-Ingestion Service loglarını takip edin:
+Canlı loglar:
 
-```powershell
-docker compose logs -f ingestion
-```
+docker compose logs -f ingestion normalizer reorg
 
-Log takibinden çıkmak için:
+Ctrl + C yalnızca log takibini kapatır. Container'ları durdurmaz.
 
-```text
-Ctrl + C
-```
+Tüm sistemi durdurmak için:
 
-Bu işlem containerı durdurmaz, yalnızca log ekranını kapatır.
-
-Tüm servisleri durdurmak için:
-
-```powershell
 docker compose down
-```
 
-Volume verilerini de tamamen silmek için:
+Volume'ları da silmek için:
 
-```powershell
 docker compose down -v
-```
 
-`-v` seçeneği Redis checkpoint ve ClickHouse verilerini de siler.
+down -v Redis state ve ClickHouse verilerini de siler.
 
----
+Monitoring Endpoint'leri
 
-## Yerel Python ile Çalıştırma
+Ingestion Service
 
-Ingestion Service yerel Python ile çalıştırılacaksa Docker içerisindeki ingestion containerı çalışmamalıdır.
-
-Önce yalnızca altyapı servislerini başlatın:
-
-```powershell
-cd C:\Users\mehmet\Desktop\evm-ingestion-pipeline
-
-docker compose down
-docker compose up -d kafka redis clickhouse
-```
-
-Ingestion Service klasörüne geçin:
-
-```powershell
-cd ingestion-service
-```
-
-Sanal ortamı etkinleştirin:
-
-```powershell
-.\.venv\Scripts\Activate.ps1
-```
-
-Bağımlılıkları yükleyin:
-
-```powershell
-py -m pip install -r requirements.txt
-```
-
-Servisi başlatın:
-
-```powershell
-py -m app.main
-```
-
-Servisi durdurmak için:
-
-```text
-Ctrl + C
-```
-
-> Docker içerisindeki ingestion servisi çalışırken ayrıca `py -m app.main` çalıştırılmamalıdır. İki servis aynı Redis checkpoint anahtarını kullanacağı için blok sırası çakışabilir.
-
----
-
-## Monitoring Endpoint’leri
-
-### Health
-
-```text
 http://localhost:8000/health
-```
-
-Beklenen cevap:
-
-```json
-{"status":"ok"}
-```
-
-### Readiness
-
-```text
 http://localhost:8000/ready
-```
-
-Beklenen cevap:
-
-```json
-{"status":"ready"}
-```
-
-### Prometheus Metrics
-
-```text
 http://localhost:8000/metrics
-```
 
-Projeye ait önemli metrikler:
+Normalizer Service
 
-```text
-evm_blocks_published_total
-evm_logs_published_total
-evm_backfill_blocks_total
-evm_block_queue_size
-evm_log_queue_size
-evm_checkpoint_block
-```
+http://localhost:8001/health
+http://localhost:8001/ready
+http://localhost:8001/metrics
 
-Yalnızca EVM metriklerini PowerShell üzerinden göstermek için:
+Re-org Service
 
-```powershell
-curl.exe -s http://localhost:8000/metrics |
-Select-String "^evm_(blocks_published_total|logs_published_total|backfill_blocks_total|block_queue_size|log_queue_size|checkpoint_block)\s"
-```
+http://localhost:8002/health
+http://localhost:8002/ready
+http://localhost:8002/metrics
 
----
+Önemli Re-org metrikleri:
 
-## Kafka
+reorg_normalized_messages_total
+reorg_canonical_events_total
+reorg_duplicate_events_total
+reorg_detected_total
+reorg_dlq_messages_total
+reorg_offset_commits_total
+reorg_processing_errors_total
+reorg_service_ready
 
-Kullanılan topic:
+Redis Ingestion Checkpoint
 
-```text
-evm.raw
-```
+BSC için checkpoint key:
 
-Docker içerisindeki Kafka adresi:
-
-```text
-kafka:19092
-```
-
-Bilgisayar üzerinden erişim adresi:
-
-```text
-localhost:9092
-```
-
-Topic listesini görüntülemek için:
-
-```powershell
-docker compose exec kafka `
-  /opt/kafka/bin/kafka-topics.sh `
-  --list `
-  --bootstrap-server localhost:19092
-```
-
-Kafka’ya gelen üç ham mesajı görüntülemek için:
-
-```powershell
-docker compose exec kafka `
-  /opt/kafka/bin/kafka-console-consumer.sh `
-  --bootstrap-server localhost:19092 `
-  --topic evm.raw `
-  --property print.key=true `
-  --property print.timestamp=true `
-  --max-messages 3
-```
-
-Kafka mesaj anahtarı olarak `chain_id` kullanılır.
-
-BSC için örnek mesaj anahtarı:
-
-```text
-56
-```
-
-Kafka’ya iki tür ham event gönderilir:
-
-```text
-raw_block
-raw_log
-```
-
----
-
-## Redis Checkpoint
-
-Redis üzerinde kullanılan checkpoint anahtarı:
-
-```text
 evm:56:ingestion:checkpoint
-```
 
-Checkpoint değerini görüntülemek için:
+Kontrol:
 
-```powershell
-docker compose exec redis redis-cli GET evm:56:ingestion:checkpoint
-```
+docker exec evm-redis redis-cli GET evm:56:ingestion:checkpoint
 
-Checkpoint yalnızca blok Kafka’ya başarıyla gönderildikten sonra güncellenir.
+Checkpoint yalnızca blok Kafka'ya başarıyla gönderildikten sonra ilerletilir.
 
-Bu sayede servis kapandığında veya bağlantı kesildiğinde son başarılı bloktan devam edebilir.
+Servis yeniden başladığında checkpoint ile güncel blok arasında boşluk varsa backfill başlatılır.
 
-Checkpoint geriye doğru güncellenmez.
+Geliştirme ortamında çok eski checkpoint milyonlarca blokluk backfill başlatabilir ve RPC kotasını tüketebilir. Test amacıyla checkpoint bilinçli olarak güncel bloğa taşınabilir. Production ortamında geçmiş veriler kontrolsüz biçimde atlanmamalıdır.
 
----
+Re-org Head Kontrolü
 
-## Gap Detection ve Backfill
+BSC için mevcut Re-org head:
 
-Servis başlangıcında:
+docker exec evm-redis redis-cli GET "reorg:head:56"
 
-1. Redis checkpoint okunur.
-2. HTTP RPC üzerinden ağdaki güncel blok numarası alınır.
-3. Checkpoint ile güncel blok arasında boşluk olup olmadığı kontrol edilir.
-4. Eksik bloklar HTTP RPC üzerinden sırayla alınır.
-5. Eksik bloklar Kafka’ya gönderilir.
-6. Başarılı gönderimden sonra checkpoint ilerletilir.
-7. Backfill tamamlandıktan sonra canlı WebSocket akışı başlatılır.
+Başarılı canlı akışta block number ağdaki güncel block seviyesine yakın olmalıdır.
 
-Canlı akış sırasında da blok numaraları arasında boşluk tespit edilirse HTTP backfill uygulanır.
+Kafka Kontrol Komutları
 
----
+Topic listesi:
 
-## Queue ve Backpressure
+docker exec evm-kafka /opt/kafka/bin/kafka-topics.sh `
+  --bootstrap-server kafka:19092 `
+  --list
 
-Bloklar ve loglar için ayrı kuyruklar kullanılır:
+Beklenen topic'ler:
 
-```text
-Block Queue: 500 event
-Log Queue: 5000 event
-```
+evm.raw
+evm.normalized
+evm.dlq
+canonical-events
 
-Queue sınırına ulaşıldığında producer yeni veri ekleyebilmek için bekler.
+Canonical event görüntüleme:
 
-Bu davranış kontrolsüz bellek kullanımını önler ve sisteme backpressure kazandırır.
+docker exec evm-kafka /opt/kafka/bin/kafka-console-consumer.sh `
+  --bootstrap-server kafka:19092 `
+  --topic canonical-events `
+  --max-messages 5 `
+  --timeout-ms 15000 `
+  --formatter-property print.key=true `
+  --formatter-property key.separator=" | "
 
----
+Başarılı event örneğinde:
 
-## HTTP Rate-Limit Yönetimi
+Kafka key = event_id
+canonical = true
+version = 1
 
-HTTP RPC sağlayıcısı `429 Too Many Requests` döndürürse:
+Manuel Testler
 
-1. `Retry-After` header değeri kontrol edilir.
-2. Geçerli bir değer varsa o süre kadar beklenir.
-3. Değer yoksa exponential backoff uygulanır.
-4. Aynı anda oluşabilecek tekrar isteklerini dağıtmak için jitter eklenir.
-5. Belirlenen retry sayısından sonra hata üst katmana aktarılır.
+Normalizer smoke test
 
----
+.\normalizer-service\.venv\Scripts\python.exe `
+  .\normalizer-service\scripts\manual\normalizer_smoke_test.py
 
-## WebSocket Dayanıklılığı
+Re-org simulation testi
 
-WebSocket bağlantısında:
+.\reorg-service\.venv\Scripts\python.exe `
+  .\scripts\manual\reorg_simulation_test.py
 
-- Ping ve pong heartbeat kullanılır.
-- Bağlantı kopması algılanır.
-- Exponential backoff uygulanır.
-- Jitter eklenir.
-- Belirlenen retry sayısına kadar yeniden bağlantı denenir.
-- Başarılı bağlantıdan sonra abonelik yeniden oluşturulur.
+Re-org testi aşağıdaki senaryoyu doğrular:
 
-Kullanılan abonelikler:
+Block A canonical=true v1
+Transaction A canonical=true v1
+Block B canonical=true v1
+Transaction B canonical=true v1
 
-```text
-newHeads
-logs
-```
+alternatif Block C gelir
 
----
+Block B canonical=false v2
+Transaction B canonical=false v2
+Block C canonical=true v1
 
-## ClickHouse
+Block C tekrar gönderilir
 
-Sprint 1 kapsamında aşağıdaki tablolar hazırlanmıştır:
+duplicate output üretilmez
 
-```text
+Sprint 2 geliştirmesinde bu test başarıyla tamamlanmıştır.
+
+Sprint 2 Doğrulama Durumu
+
+Sprint 2 sonunda canlı veri hattı aşağıdaki noktaya kadar uçtan uca doğrulanmıştır:
+
+BSC
+ |
+ v
+Ingestion Service
+ |
+ v
+evm.raw
+ |
+ v
+Normalizer Service
+ |
+ v
+evm.normalized
+ |
+ v
+Re-org / Idempotency Service
+ |
+ v
+canonical-events
+
+Canlı canonical-events mesajlarında:
+
+canonical=true
+version=1
+Kafka key=event_id
+
+doğrulanmıştır.
+
+Re-org simulation testinde:
+
+reorg_detected_total = 1
+duplicate_events_total = 1
+DLQ = 0
+processing_errors = 0
+
+beklenen davranış doğrulanmıştır.
+
+ClickHouse
+
+ClickHouse container'ı ve başlangıç tabloları projede bulunmaktadır:
+
 evm.blocks
 evm.transactions
 evm.logs
-```
 
-Tabloları görüntülemek için:
+Tablolarda:
 
-```powershell
-docker compose exec clickhouse clickhouse-client `
-  --user $env:CLICKHOUSE_USER `
-  --password $env:CLICKHOUSE_PASSWORD `
-  --query "SHOW TABLES FROM evm"
-```
+ReplacingMergeTree(version)
 
-Alternatif olarak container içerisindeki varsayılan yapılandırmayla:
+kullanılır.
 
-```powershell
-docker compose exec clickhouse clickhouse-client `
-  --query "SHOW TABLES FROM evm"
-```
+Sprint 2 sonunda canonical-events henüz ClickHouse'a yazılmamaktadır.
 
-Tablolar `ReplacingMergeTree(version)` kullanır.
+Bu işlem Batch Writer Service tarafından sonraki sprintte geliştirilecektir.
 
-Bu yapı aynı kaydın yeni bir versiyonu geldiğinde append mantığıyla yazılmasını ve sorgu sırasında en güncel versiyonun seçilebilmesini sağlar.
+Sonraki Sprint
 
-Sprint 1’de ClickHouse’a veri yazılmaz.
+Bir sonraki ana akış:
 
-Mevcut akış:
+canonical-events
+      |
+      v
+Batch Writer Service
+      |
+      v
+ClickHouse
 
-```text
-BSC RPC
-→ Ingestion Service
-→ Kafka evm.raw
-```
+Planlanan başlıca işler:
 
-ClickHouse yazımı sonraki sprintlerde geliştirilecek Normalizer ve Batch Writer servisleri tarafından yapılacaktır.
+Batch Writer Service
 
----
+2.000 kayıt veya 3 saniye batch yazımı
 
-## Manuel Kontrol Scriptleri
+ClickHouse'a yüksek performanslı insert
 
-Manuel scriptler ana uygulama çalışırken otomatik olarak çalışmaz.
+Başarılı yazımdan sonra Kafka offset commit
 
-Bileşenleri ayrı ayrı test etmek için kullanılır.
+Idempotent veri yazımı
 
-Ingestion Service klasöründe:
+Retry Writer
 
-```powershell
-cd ingestion-service
-```
+Reconciliation Service
 
-HTTP RPC testi:
+Incoming / Processed ID takibi
 
-```powershell
-py -m scripts.manual.rpc_test
-```
+Final E2E testleri
 
-WebSocket testi:
+Monitoring ve dokümantasyon iyileştirmeleri
 
-```powershell
-py -m scripts.manual.websocket_test
-```
+Git Branch
 
-Log aboneliği testi:
+Sprint 2 geliştirmeleri:
 
-```powershell
-py -m scripts.manual.logs_test
-```
+feature/sprint-2-processing
 
-Redis testi:
+Aktif branch:
 
-```powershell
-py -m scripts.manual.redis_test
-```
-
-Kafka payload testi:
-
-```powershell
-py -m scripts.manual.kafka_payload_test
-```
-
-Checkpoint testi:
-
-```powershell
-py -m scripts.manual.checkpoint_test
-```
-
-429 testi:
-
-```powershell
-py -m scripts.manual.http_429_test
-```
-
----
-
-## Demo Checkpoint Scripti
-
-Sunum veya geliştirme sırasında binlerce eski bloğun backfill edilmesini önlemek için checkpoint güncel bloğa yaklaştırılabilir:
-
-```powershell
-py -m scripts.dev.set_test_checkpoint
-```
-
-Bu script Redis checkpoint değerini bilinçli olarak değiştirir.
-
-Production ortamında kullanılmamalıdır.
-
----
-
-## Temel Kontrol Komutları
-
-Docker Compose yapılandırmasını doğrulamak için:
-
-```powershell
-docker compose config --quiet
-```
-
-Container durumlarını görmek için:
-
-```powershell
-docker compose ps
-```
-
-Ingestion loglarında kritik hata aramak için:
-
-```powershell
-docker compose logs --tail=200 ingestion |
-Select-String "Traceback|ERROR|Exception|ModuleNotFound|Blok sırası bozuldu"
-```
-
-Python dosyalarının sözdizimini kontrol etmek için:
-
-```powershell
-cd ingestion-service
-py -m compileall -q app scripts
-```
-
-Ana modül import kontrolü:
-
-```powershell
-py -c "from app.services.ingestion import run_ingestion; print('Import başarılı')"
-```
-
----
-
-## Sunumda Çalıştırma
-
-Proje kökünde:
-
-```powershell
-cd C:\Users\mehmet\Desktop\evm-ingestion-pipeline
-
-docker compose down
-docker compose up -d kafka redis clickhouse
-```
-
-Checkpoint’i güncel bloğa yaklaştırın:
-
-```powershell
-cd ingestion-service
-.\.venv\Scripts\Activate.ps1
-py -m scripts.dev.set_test_checkpoint
-cd ..
-```
-
-Ingestion servisini başlatın:
-
-```powershell
-docker compose up -d --build ingestion
-```
-
-Containerları kontrol edin:
-
-```powershell
-docker compose ps
-```
-
-Canlı logları gösterin:
-
-```powershell
-docker compose logs -f ingestion
-```
-
-Kafka mesajlarını gösterin:
-
-```powershell
-docker compose exec kafka `
-  /opt/kafka/bin/kafka-console-consumer.sh `
-  --bootstrap-server localhost:19092 `
-  --topic evm.raw `
-  --property print.key=true `
-  --max-messages 3
-```
-
-Redis checkpoint’i gösterin:
-
-```powershell
-docker compose exec redis redis-cli GET evm:56:ingestion:checkpoint
-```
-
-Monitoring endpoint’lerini gösterin:
-
-```text
-http://localhost:8000/health
-http://localhost:8000/ready
-http://localhost:8000/metrics
-```
-
-Sunum sonunda:
-
-```powershell
-docker compose down
-```
-
----
-
-## Sprint 1 Durumu
-
-Sprint 1 kapsamında hedeflenen çekirdek hat çalışmaktadır:
-
-```text
-BSC WebSocket + HTTP RPC
-          ↓
-    Ingestion Service
-          ↓
-      Kafka evm.raw
-```
-
-Ek olarak aşağıdaki güvenilirlik ve izlenebilirlik özellikleri uygulanmıştır:
-
-```text
-Redis checkpoint
-Gap detection
-HTTP backfill
-Bounded queue
-Backpressure
-429 rate-limit kontrolü
-Exponential backoff
-Jitter
-WebSocket reconnect
-Health endpoint
-Readiness endpoint
-Prometheus metrics
-```
-
----
-
-## Sonraki Sprintler
-
-Sonraki aşamalarda aşağıdaki servislerin geliştirilmesi planlanmaktadır:
-
-- Normalizer Service
-- Deterministik `event_id`
-- Veri doğrulama
-- Dead Letter Queue
-- Re-org Service
-- Canonical event yönetimi
-- Batch Writer Service
-- 2.000 kayıt veya 3 saniye batch yazımı
-- ClickHouse veri yazımı
-- Retry Writer
-- Reconciliation Service
-- Prometheus ve Grafana dashboardları
-
----
-
-## Git Branch
-
-Sprint 1 geliştirmeleri aşağıdaki branch üzerinden yürütülür:
-
-```text
-feature/sprint-1-ingestion
-```
-
-Aktif branch’i kontrol etmek için:
-
-```powershell
 git branch --show-current
-```
 
-Git durumunu kontrol etmek için:
+Değişiklik kontrolü:
 
-```powershell
-git status
-```
+git status --short
+git diff --stat
 
----
+Güvenlik
 
-## Güvenlik
+Gerçek RPC API anahtarları Git deposuna gönderilmemelidir.
 
-- Gerçek RPC API anahtarları Git deposuna gönderilmemelidir.
-- `.env` dosyası `.gitignore` içinde bulunmalıdır.
-- `.env.example` yalnızca örnek değerler içermelidir.
-- Repository’ye push işleminden önce secret kontrolü yapılmalıdır.
+.env .gitignore içinde tutulmalıdır.
+
+.env.example yalnızca örnek değerler içermelidir.
+
+Commit öncesinde secret kontrolü yapılmalıdır.

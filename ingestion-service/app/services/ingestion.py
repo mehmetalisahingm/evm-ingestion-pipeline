@@ -21,6 +21,7 @@ from app.monitoring.metrics import (
     LOG_QUEUE_SIZE,
     LOGS_PUBLISHED_TOTAL,
 )
+
 #1
 def create_raw_block_event(block: dict) -> dict:
     return {
