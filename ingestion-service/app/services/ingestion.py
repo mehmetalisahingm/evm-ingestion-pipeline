@@ -25,9 +25,9 @@ from app.rpc.http_client import (
 from app.rpc.websocket_client import stream_new_blocks
 from app.settings import (
     BACKFILL_CONCURRENCY,
-    BACKFILL_TARGET_EVENTS_PER_SECOND,
     BLOCK_QUEUE_MAX_SIZE,
     CHAIN_ID,
+    INGESTION_TARGET_EVENTS_PER_SECOND,
     MONITORING_PORT,
 )
 from app.storage.checkpoint import (
@@ -110,9 +110,7 @@ def extract_logs_from_receipts(
         ):
             continue
 
-        logs.extend(
-            receipt_logs
-        )
+        logs.extend(receipt_logs)
 
     return logs
 
@@ -196,9 +194,7 @@ async def backfill_blocks(
     print(
         "Eksik bloklar düzenleniyor "
         f"{start_block} ---> {end_block} | "
-        f"Concurrency: {BACKFILL_CONCURRENCY} | "
-        "Hedef normalized hız: "
-        f"{BACKFILL_TARGET_EVENTS_PER_SECOND:.0f} event/s",
+        f"Concurrency: {BACKFILL_CONCURRENCY}",
         flush=True,
     )
 
@@ -209,9 +205,6 @@ async def backfill_blocks(
     )
 
     completed = 0
-
-    loop = asyncio.get_running_loop()
-    next_release_at = loop.time()
 
     for batch_start in range(
         start_block,
@@ -243,20 +236,6 @@ async def backfill_blocks(
         )
 
         for bundle in bundles:
-            estimated_events = (
-                estimate_normalized_event_count(
-                    bundle
-                )
-            )
-
-            now = loop.time()
-
-            if next_release_at > now:
-                await asyncio.sleep(
-                    next_release_at - now
-                )
-                now = loop.time()
-
             await block_queue.put(
                 bundle
             )
@@ -268,19 +247,6 @@ async def backfill_blocks(
             )
 
             completed += 1
-
-            pacing_seconds = (
-                estimated_events
-                / BACKFILL_TARGET_EVENTS_PER_SECOND
-            )
-
-            next_release_at = (
-                max(
-                    next_release_at,
-                    now,
-                )
-                + pacing_seconds
-            )
 
         if (
             completed % 100
@@ -315,26 +281,18 @@ async def http_poll_fallback(
         + HTTP_FALLBACK_DURATION_SECONDS
     )
 
-    while (
-        loop.time()
-        < fallback_end_time
-    ):
+    while loop.time() < fallback_end_time:
         latest_block = (
             await get_latest_block_number(
                 session
             )
         )
 
-        if (
-            latest_block
-            >= next_expected_block
-        ):
+        if latest_block >= next_expected_block:
             await backfill_blocks(
                 block_queue=block_queue,
                 session=session,
-                start_block=(
-                    next_expected_block
-                ),
+                start_block=next_expected_block,
                 end_block=latest_block,
             )
 
@@ -380,10 +338,7 @@ async def ingest_blocks(
                     16,
                 )
 
-                if (
-                    block_number
-                    < next_expected_block
-                ):
+                if block_number < next_expected_block:
                     print(
                         "Eski blok atlandı "
                         f"{block_number}",
@@ -391,18 +346,11 @@ async def ingest_blocks(
                     )
                     continue
 
-                if (
-                    block_number
-                    > next_expected_block
-                ):
+                if block_number > next_expected_block:
                     await backfill_blocks(
-                        block_queue=(
-                            block_queue
-                        ),
+                        block_queue=block_queue,
                         session=session,
-                        start_block=(
-                            next_expected_block
-                        ),
+                        start_block=next_expected_block,
                         end_block=(
                             block_number - 1
                         ),
@@ -411,9 +359,7 @@ async def ingest_blocks(
                 bundle = (
                     await create_block_bundle(
                         session=session,
-                        block_number=(
-                            block_number
-                        ),
+                        block_number=block_number,
                     )
                 )
 
@@ -443,9 +389,7 @@ async def ingest_blocks(
             try:
                 next_expected_block = (
                     await http_poll_fallback(
-                        block_queue=(
-                            block_queue
-                        ),
+                        block_queue=block_queue,
                         session=session,
                         next_expected_block=(
                             next_expected_block
@@ -466,9 +410,7 @@ async def ingest_blocks(
                     flush=True,
                 )
 
-                await asyncio.sleep(
-                    5
-                )
+                await asyncio.sleep(5)
 
 
 async def publish_block_bundles(
@@ -484,11 +426,19 @@ async def publish_block_bundles(
         )
     )
 
+    loop = asyncio.get_running_loop()
+    next_publish_at = loop.time()
+
+    print(
+        "Ingestion publish hedefi: "
+        f"{INGESTION_TARGET_EVENTS_PER_SECOND:.0f} "
+        "normalized event/s",
+        flush=True,
+    )
+
     while True:
-        (
-            block_event,
-            log_events,
-        ) = await block_queue.get()
+        bundle = await block_queue.get()
+        block_event, log_events = bundle
 
         BLOCK_QUEUE_SIZE.set(
             block_queue.qsize()
@@ -501,18 +451,12 @@ async def publish_block_bundles(
                 ]
             )
 
-            if (
-                last_checkpoint
-                is not None
-            ):
+            if last_checkpoint is not None:
                 expected_block = (
                     last_checkpoint + 1
                 )
 
-                if (
-                    block_number
-                    != expected_block
-                ):
+                if block_number != expected_block:
                     raise RuntimeError(
                         "Blok sırası bozuldu. "
                         f"Beklenen: "
@@ -521,6 +465,20 @@ async def publish_block_bundles(
                         f"{block_number}"
                     )
 
+            estimated_events = (
+                estimate_normalized_event_count(
+                    bundle
+                )
+            )
+
+            now = loop.time()
+
+            if next_publish_at > now:
+                await asyncio.sleep(
+                    next_publish_at - now
+                )
+                now = loop.time()
+
             events = [
                 block_event,
                 *log_events,
@@ -528,6 +486,19 @@ async def publish_block_bundles(
 
             await producer.send_events(
                 events
+            )
+
+            pacing_seconds = (
+                estimated_events
+                / INGESTION_TARGET_EVENTS_PER_SECOND
+            )
+
+            next_publish_at = (
+                max(
+                    next_publish_at,
+                    now,
+                )
+                + pacing_seconds
             )
 
             if log_events:
@@ -540,9 +511,7 @@ async def publish_block_bundles(
                 block_number=block_number,
             )
 
-            last_checkpoint = (
-                block_number
-            )
+            last_checkpoint = block_number
 
             transaction_count = len(
                 block_event[
@@ -558,6 +527,8 @@ async def publish_block_bundles(
                 f"{transaction_count} | "
                 "Log: "
                 f"{len(log_events)} | "
+                "Tahmini normalized: "
+                f"{estimated_events} | "
                 "Checkpoint kaydedildi | "
                 "Blok kuyruğu: "
                 f"{block_queue.qsize()}/"
@@ -578,9 +549,7 @@ async def publish_block_bundles(
 async def run_ingestion() -> None:
     producer = KafkaProducerService()
 
-    redis_client = (
-        create_redis_client()
-    )
+    redis_client = create_redis_client()
 
     monitoring_runner = (
         await start_monitoring_server(
@@ -632,7 +601,6 @@ async def run_ingestion() -> None:
                 next_expected_block = (
                     latest_block + 1
                 )
-
             else:
                 next_expected_block = (
                     checkpoint + 1
@@ -650,21 +618,12 @@ async def run_ingestion() -> None:
                     )
                 )
 
-                if (
-                    next_expected_block
-                    <= latest_block
-                ):
+                if next_expected_block <= latest_block:
                     await backfill_blocks(
-                        block_queue=(
-                            block_queue
-                        ),
+                        block_queue=block_queue,
                         session=session,
-                        start_block=(
-                            next_expected_block
-                        ),
-                        end_block=(
-                            latest_block
-                        ),
+                        start_block=next_expected_block,
+                        end_block=latest_block,
                     )
 
                     await block_queue.join()
