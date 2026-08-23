@@ -24,6 +24,8 @@ from app.rpc.http_client import (
 )
 from app.rpc.websocket_client import stream_new_blocks
 from app.settings import (
+    BACKFILL_CONCURRENCY,
+    BACKFILL_TARGET_EVENTS_PER_SECOND,
     BLOCK_QUEUE_MAX_SIZE,
     CHAIN_ID,
     MONITORING_PORT,
@@ -36,8 +38,6 @@ from app.storage.redis_client import (
     create_redis_client,
 )
 
-
-BACKFILL_CONCURRENCY = 5
 
 HTTP_POLL_INTERVAL_SECONDS = 2
 HTTP_FALLBACK_DURATION_SECONDS = 30
@@ -117,6 +117,36 @@ def extract_logs_from_receipts(
     return logs
 
 
+def estimate_normalized_event_count(
+    bundle: tuple[dict, list[dict]],
+) -> int:
+    """
+    Bir raw block bundle'ının Normalizer sonrasında
+    yaklaşık kaç event üreteceğini hesaplar.
+
+    1 block event + transaction eventleri + log eventleri.
+    """
+
+    block_event, log_events = bundle
+
+    transactions = (
+        block_event.get("payload", {})
+        .get("transactions", [])
+    )
+
+    transaction_count = (
+        len(transactions)
+        if isinstance(transactions, list)
+        else 0
+    )
+
+    return (
+        1
+        + transaction_count
+        + len(log_events)
+    )
+
+
 async def create_block_bundle(
     *,
     session: aiohttp.ClientSession,
@@ -166,7 +196,9 @@ async def backfill_blocks(
     print(
         "Eksik bloklar düzenleniyor "
         f"{start_block} ---> {end_block} | "
-        f"Concurrency: {BACKFILL_CONCURRENCY}",
+        f"Concurrency: {BACKFILL_CONCURRENCY} | "
+        "Hedef normalized hız: "
+        f"{BACKFILL_TARGET_EVENTS_PER_SECOND:.0f} event/s",
         flush=True,
     )
 
@@ -177,6 +209,9 @@ async def backfill_blocks(
     )
 
     completed = 0
+
+    loop = asyncio.get_running_loop()
+    next_release_at = loop.time()
 
     for batch_start in range(
         start_block,
@@ -208,6 +243,20 @@ async def backfill_blocks(
         )
 
         for bundle in bundles:
+            estimated_events = (
+                estimate_normalized_event_count(
+                    bundle
+                )
+            )
+
+            now = loop.time()
+
+            if next_release_at > now:
+                await asyncio.sleep(
+                    next_release_at - now
+                )
+                now = loop.time()
+
             await block_queue.put(
                 bundle
             )
@@ -219,6 +268,19 @@ async def backfill_blocks(
             )
 
             completed += 1
+
+            pacing_seconds = (
+                estimated_events
+                / BACKFILL_TARGET_EVENTS_PER_SECOND
+            )
+
+            next_release_at = (
+                max(
+                    next_release_at,
+                    now,
+                )
+                + pacing_seconds
+            )
 
         if (
             completed % 100
@@ -407,6 +469,7 @@ async def ingest_blocks(
                 await asyncio.sleep(
                     5
                 )
+
 
 async def publish_block_bundles(
     block_queue: asyncio.Queue[
