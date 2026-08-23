@@ -24,8 +24,11 @@ KAFKA_TOPIC = os.getenv(
     "evm.raw",
 )
 
+# Full block + receipt/log bundle'ları büyük olabilir.
+# Küçük bounded queue gerçek backpressure sağlar ve
+# uzun backfill sırasında ingestion RAM'ini sınırlı tutar.
 BLOCK_QUEUE_MAX_SIZE = int(
-    os.getenv("BLOCK_QUEUE_MAX_SIZE", "500")
+    os.getenv("BLOCK_QUEUE_MAX_SIZE", "20")
 )
 
 LOG_QUEUE_MAX_SIZE = int(
