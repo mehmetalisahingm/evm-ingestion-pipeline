@@ -36,13 +36,18 @@ BACKFILL_CONCURRENCY = int(
     os.getenv("BACKFILL_CONCURRENCY", "5")
 )
 
-# Backfill'in Normalizer/Re-org hattını boğmaması için
-# tahmini normalized event üretim hızını sınırlar.
-# Canlı WebSocket akışı bu limite tabi değildir.
-BACKFILL_TARGET_EVENTS_PER_SECOND = float(
+# Kafka'ya yayınlanan tahmini normalized event hızını sınırlar.
+# Bu limit backfill ve canlı akış için ortaktır; böylece downstream
+# Re-org servisi sürekli büyüyen bir lag altında kalmaz.
+# Eski BACKFILL_TARGET_EVENTS_PER_SECOND değişkeni geriye dönük
+# uyumluluk için fallback olarak desteklenir.
+INGESTION_TARGET_EVENTS_PER_SECOND = float(
     os.getenv(
-        "BACKFILL_TARGET_EVENTS_PER_SECOND",
-        "1200",
+        "INGESTION_TARGET_EVENTS_PER_SECOND",
+        os.getenv(
+            "BACKFILL_TARGET_EVENTS_PER_SECOND",
+            "900",
+        ),
     )
 )
 
