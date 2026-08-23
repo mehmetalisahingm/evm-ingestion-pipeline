@@ -1,6 +1,5 @@
 import asyncio
 import json
-from collections import defaultdict
 from typing import Any
 
 from app.kafka.consumer import ReorgKafkaConsumer
@@ -17,7 +16,9 @@ from app.monitoring.metrics import (
 )
 from app.monitoring.server import start_monitoring_server
 from app.reorg.processor import (
-    ProcessingResult,
+    PreparedProcessing,
+    commit_prepared_batch,
+    prepare_message,
     process_message,
 )
 from app.reorg.service import ReorgService
@@ -27,7 +28,6 @@ from app.state.redis_store import RedisStateStore
 
 BATCH_SIZE = 500
 BATCH_TIMEOUT_MS = 100
-
 CHILD_CONCURRENCY = 100
 
 
@@ -38,17 +38,6 @@ def get_event_metadata(
     str,
     dict[str, Any] | None,
 ]:
-    """
-    Kafka mesajını bir kere JSON olarak
-    parse eder.
-
-    event_type, event_id ve parse edilmiş
-    raw event birlikte döndürülür.
-
-    Böylece processor.py içinde aynı JSON
-    tekrar parse edilmez.
-    """
-
     fallback_id = (
         f"{message.topic}:"
         f"{message.partition}:"
@@ -57,53 +46,25 @@ def get_event_metadata(
 
     try:
         raw_event = json.loads(
-            message.value.decode(
-                "utf-8"
-            )
+            message.value.decode("utf-8")
         )
 
-        if not isinstance(
-            raw_event,
-            dict,
-        ):
-            return (
-                None,
-                fallback_id,
-                None,
-            )
+        if not isinstance(raw_event, dict):
+            return None, fallback_id, None
 
-        event_type = raw_event.get(
-            "event_type"
-        )
+        event_type = raw_event.get("event_type")
+        event_id = raw_event.get("event_id")
 
-        event_id = raw_event.get(
-            "event_id"
-        )
-
-        if not isinstance(
-            event_type,
-            str,
-        ):
+        if not isinstance(event_type, str):
             event_type = None
 
-        if not isinstance(
-            event_id,
-            str,
-        ):
+        if not isinstance(event_id, str):
             event_id = fallback_id
 
-        return (
-            event_type,
-            event_id,
-            raw_event,
-        )
+        return event_type, event_id, raw_event
 
     except Exception:
-        return (
-            None,
-            fallback_id,
-            None,
-        )
+        return None, fallback_id, None
 
 
 async def run() -> None:
@@ -112,9 +73,7 @@ async def run() -> None:
 
     state_store = RedisStateStore(
         redis_url=settings.redis_url,
-        window_size=(
-            settings.redis_window_size
-        ),
+        window_size=settings.redis_window_size,
         pending_ttl_seconds=(
             settings.pending_event_ttl_seconds
         ),
@@ -125,7 +84,6 @@ async def run() -> None:
     )
 
     monitoring_runner = None
-
     consumer_started = False
     producer_started = False
     redis_started = False
@@ -134,15 +92,6 @@ async def run() -> None:
 
     semaphore = asyncio.Semaphore(
         CHILD_CONCURRENCY
-    )
-
-    # Aynı event_id'nin iki kopyası
-    # aynı anda işlenmesin.
-    event_locks: dict[
-        str,
-        asyncio.Lock,
-    ] = defaultdict(
-        asyncio.Lock
     )
 
     try:
@@ -154,7 +103,6 @@ async def run() -> None:
 
         await state_store.start()
         redis_started = True
-
         print(
             "Redis bağlantısı hazır",
             flush=True,
@@ -162,7 +110,6 @@ async def run() -> None:
 
         await producer.start()
         producer_started = True
-
         print(
             "Kafka producer hazır",
             flush=True,
@@ -170,7 +117,6 @@ async def run() -> None:
 
         await consumer.start()
         consumer_started = True
-
         print(
             "Kafka consumer hazır",
             flush=True,
@@ -186,47 +132,22 @@ async def run() -> None:
             flush=True,
         )
 
-        async def process_child(
+        async def prepare_child(
             message: Any,
-            event_id: str,
-            raw_event: dict[
-                str,
-                Any,
-            ] | None,
-        ) -> ProcessingResult:
-            """
-            Transaction ve log eventleri
-            paralel çalışabilir.
-
-            Aynı event_id'nin tekrar gelen
-            kopyaları lock sayesinde aynı anda
-            state değiştiremez.
-            """
-
+            raw_event: dict[str, Any] | None,
+        ) -> PreparedProcessing:
             async with semaphore:
-                async with (
-                    event_locks[event_id]
-                ):
-                    return await process_message(
-                        message,
-                        reorg_service=(
-                            reorg_service
-                        ),
-                        producer=producer,
-                        state_store=(
-                            state_store
-                        ),
-                        raw_event=raw_event,
-                    )
+                return await prepare_message(
+                    message,
+                    reorg_service=reorg_service,
+                    producer=producer,
+                    raw_event=raw_event,
+                )
 
         while True:
-            messages = (
-                await consumer.get_batch(
-                    timeout_ms=(
-                        BATCH_TIMEOUT_MS
-                    ),
-                    max_records=BATCH_SIZE,
-                )
+            messages = await consumer.get_batch(
+                timeout_ms=BATCH_TIMEOUT_MS,
+                max_records=BATCH_SIZE,
             )
 
             if not messages:
@@ -245,6 +166,15 @@ async def run() -> None:
                 ]
             ] = []
 
+            parsed_messages: list[
+                tuple[
+                    Any,
+                    str | None,
+                    str,
+                    dict[str, Any] | None,
+                ]
+            ] = []
+
             async def flush_children() -> None:
                 nonlocal canonical_count
                 nonlocal duplicate_count
@@ -254,99 +184,169 @@ async def run() -> None:
                 if not child_messages:
                     return
 
-                tasks = [
-                    process_child(
-                        message,
-                        event_id,
-                        raw_event,
-                    )
+                pending = list(child_messages)
+                child_messages.clear()
+
+                while pending:
+                    seen_event_ids: set[str] = set()
+
+                    wave: list[
+                        tuple[
+                            Any,
+                            str,
+                            dict[str, Any] | None,
+                        ]
+                    ] = []
+
+                    deferred: list[
+                        tuple[
+                            Any,
+                            str,
+                            dict[str, Any] | None,
+                        ]
+                    ] = []
+
                     for (
                         message,
                         event_id,
                         raw_event,
-                    ) in child_messages
-                ]
+                    ) in pending:
+                        if event_id in seen_event_ids:
+                            deferred.append(
+                                (
+                                    message,
+                                    event_id,
+                                    raw_event,
+                                )
+                            )
+                            continue
 
-                results = (
-                    await asyncio.gather(
+                        seen_event_ids.add(event_id)
+                        wave.append(
+                            (
+                                message,
+                                event_id,
+                                raw_event,
+                            )
+                        )
+
+                    tasks = [
+                        prepare_child(
+                            message,
+                            raw_event,
+                        )
+                        for (
+                            message,
+                            _event_id,
+                            raw_event,
+                        ) in wave
+                    ]
+
+                    results = await asyncio.gather(
                         *tasks,
                         return_exceptions=True,
                     )
-                )
 
-                child_messages.clear()
+                    prepared_wave: list[
+                        PreparedProcessing
+                    ] = []
 
-                first_error: (
-                    BaseException | None
-                ) = None
+                    first_error: BaseException | None = None
 
-                for result in results:
-                    if isinstance(
-                        result,
-                        BaseException,
-                    ):
-                        if first_error is None:
-                            first_error = result
+                    for result in results:
+                        if isinstance(
+                            result,
+                            BaseException,
+                        ):
+                            if first_error is None:
+                                first_error = result
+                            continue
 
-                        continue
+                        prepared_wave.append(result)
 
-                    canonical_count += (
-                        result.canonical_count
+                    if first_error is not None:
+                        raise first_error
+
+                    await commit_prepared_batch(
+                        prepared_wave,
+                        producer=producer,
+                        state_store=state_store,
                     )
 
-                    duplicate_count += (
-                        result.duplicate_count
-                    )
+                    for prepared in prepared_wave:
+                        result = prepared.result
 
-                    if result.reorg_detected:
-                        reorg_count += 1
+                        canonical_count += (
+                            result.canonical_count
+                        )
+                        duplicate_count += (
+                            result.duplicate_count
+                        )
 
-                    if result.sent_to_dlq:
-                        dlq_count += 1
+                        if result.reorg_detected:
+                            reorg_count += 1
 
-                if first_error is not None:
-                    raise first_error
+                        if result.sent_to_dlq:
+                            dlq_count += 1
+
+                    pending = deferred
 
             try:
-                for message in messages:
-                    NORMALIZED_MESSAGES_TOTAL.inc()
+                event_ids_to_prefetch: list[str] = []
 
+                for message in messages:
                     (
                         event_type,
                         event_id,
                         raw_event,
-                    ) = get_event_metadata(
-                        message
+                    ) = get_event_metadata(message)
+
+                    parsed_messages.append(
+                        (
+                            message,
+                            event_type,
+                            event_id,
+                            raw_event,
+                        )
                     )
 
+                    if (
+                        raw_event is not None
+                        and isinstance(
+                            raw_event.get("event_id"),
+                            str,
+                        )
+                    ):
+                        event_ids_to_prefetch.append(
+                            event_id
+                        )
+
+                await state_store.prefetch_event_states(
+                    event_ids_to_prefetch
+                )
+
+                for (
+                    message,
+                    event_type,
+                    event_id,
+                    raw_event,
+                ) in parsed_messages:
+                    NORMALIZED_MESSAGES_TOTAL.inc()
+
                     if event_type == "block":
-                        # Önce önceki bloğa ait
-                        # transaction ve log işleri
-                        # tamamen bitsin.
                         await flush_children()
 
-                        # Block eventleri mutlaka
-                        # sırayla işlenir.
-                        result = (
-                            await process_message(
-                                message,
-                                reorg_service=(
-                                    reorg_service
-                                ),
-                                producer=producer,
-                                state_store=(
-                                    state_store
-                                ),
-                                raw_event=(
-                                    raw_event
-                                ),
-                            )
+                        result = await process_message(
+                            message,
+                            reorg_service=reorg_service,
+                            producer=producer,
+                            state_store=state_store,
+                            raw_event=raw_event,
                         )
 
                         canonical_count += (
                             result.canonical_count
                         )
-
                         duplicate_count += (
                             result.duplicate_count
                         )
@@ -366,23 +366,16 @@ async def run() -> None:
                             )
                         )
 
-                # Batch sonunda kalan transaction
-                # ve log eventlerini tamamla.
                 await flush_children()
 
-                # Bütün batch başarıyla işlendi.
-                # Partition başına tek offset
-                # commit yapılır.
                 await consumer.commit_batch(
                     messages
                 )
 
                 OFFSET_COMMITS_TOTAL.inc()
-
                 CANONICAL_EVENTS_TOTAL.inc(
                     canonical_count
                 )
-
                 DUPLICATE_EVENTS_TOTAL.inc(
                     duplicate_count
                 )
@@ -401,7 +394,6 @@ async def run() -> None:
                     message.offset
                     for message in messages
                 )
-
                 last_offset = max(
                     message.offset
                     for message in messages
@@ -409,18 +401,12 @@ async def run() -> None:
 
                 print(
                     "Re-org batch tamamlandı | "
-                    f"Normalized: "
-                    f"{len(messages)} | "
-                    f"Canonical: "
-                    f"{canonical_count} | "
-                    f"Duplicate: "
-                    f"{duplicate_count} | "
-                    f"Reorg: "
-                    f"{reorg_count} | "
-                    f"DLQ: "
-                    f"{dlq_count} | "
-                    f"Offset: "
-                    f"{first_offset}-"
+                    f"Normalized: {len(messages)} | "
+                    f"Canonical: {canonical_count} | "
+                    f"Duplicate: {duplicate_count} | "
+                    f"Reorg: {reorg_count} | "
+                    f"DLQ: {dlq_count} | "
+                    f"Offset: {first_offset}-"
                     f"{last_offset}",
                     flush=True,
                 )
@@ -430,21 +416,17 @@ async def run() -> None:
 
                 print(
                     "Re-org batch hatası | "
-                    f"Mesaj sayısı: "
-                    f"{len(messages)} | "
+                    f"Mesaj sayısı: {len(messages)} | "
                     f"Hata: "
                     f"{type(error).__name__}: "
                     f"{error}",
                     flush=True,
                 )
 
-                # Offset commit edilmez.
-                #
-                # Daha önce başarılı olmuş
-                # eventler replay edilirse
-                # Redis idempotency tarafından
-                # duplicate olarak yakalanır.
                 raise
+
+            finally:
+                state_store.clear_prefetched_event_states()
 
     finally:
         SERVICE_READY.set(0)
@@ -464,10 +446,7 @@ async def run() -> None:
 
 def main() -> None:
     try:
-        asyncio.run(
-            run()
-        )
-
+        asyncio.run(run())
     except KeyboardInterrupt:
         print(
             "\nRe-org Service durduruldu"
