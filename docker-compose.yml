@@ -1,15 +1,43 @@
 services:
+  kafka-storage-init:
+    image: alpine:3.20
+    container_name: evm-kafka-storage-init
+
+    user: "0:0"
+
+    command:
+      - sh
+      - -c
+      - chown -R 1000:1000 /kafka-data
+
+    volumes:
+      - kafka_data:/kafka-data
+
+    restart: "no"
+
+
   kafka:
     image: apache/kafka:4.3.1
     hostname: kafka
     container_name: evm-kafka
 
+    depends_on:
+      kafka-storage-init:
+        condition: service_completed_successfully
+
     ports:
       - "9092:9092"
 
+    volumes:
+      - kafka_data:/tmp/kraft-combined-logs
+
     environment:
+      CLUSTER_ID: "4L6g3nShT-eMCtK--X86sw"
+
       KAFKA_NODE_ID: 1
       KAFKA_PROCESS_ROLES: broker,controller
+
+      KAFKA_LOG_DIRS: /tmp/kraft-combined-logs
 
       KAFKA_LISTENERS: >-
         INTERNAL://0.0.0.0:19092,
@@ -425,6 +453,7 @@ services:
 
 
 volumes:
+  kafka_data:
   redis_data:
   clickhouse_data:
   prometheus_data:

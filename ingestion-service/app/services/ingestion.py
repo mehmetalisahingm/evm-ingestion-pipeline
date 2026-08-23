@@ -37,6 +37,12 @@ from app.storage.redis_client import (
 )
 
 
+BACKFILL_CONCURRENCY = 5
+
+HTTP_POLL_INTERVAL_SECONDS = 2
+HTTP_FALLBACK_DURATION_SECONDS = 30
+
+
 def create_raw_block_event(
     block: dict,
 ) -> dict:
@@ -104,7 +110,9 @@ def extract_logs_from_receipts(
         ):
             continue
 
-        logs.extend(receipt_logs)
+        logs.extend(
+            receipt_logs
+        )
 
     return logs
 
@@ -114,14 +122,15 @@ async def create_block_bundle(
     session: aiohttp.ClientSession,
     block_number: int,
 ) -> tuple[dict, list[dict]]:
-    block = await get_block_by_number(
-        session=session,
-        block_number=block_number,
-    )
-
-    receipts = await get_block_receipts(
-        session=session,
-        block_number=block_number,
+    block, receipts = await asyncio.gather(
+        get_block_by_number(
+            session=session,
+            block_number=block_number,
+        ),
+        get_block_receipts(
+            session=session,
+            block_number=block_number,
+        ),
     )
 
     raw_logs = extract_logs_from_receipts(
@@ -156,7 +165,8 @@ async def backfill_blocks(
 
     print(
         "Eksik bloklar düzenleniyor "
-        f"{start_block} ---> {end_block}",
+        f"{start_block} ---> {end_block} | "
+        f"Concurrency: {BACKFILL_CONCURRENCY}",
         flush=True,
     )
 
@@ -166,35 +176,54 @@ async def backfill_blocks(
         + 1
     )
 
-    for block_number in range(
+    completed = 0
+
+    for batch_start in range(
         start_block,
         end_block + 1,
+        BACKFILL_CONCURRENCY,
     ):
-        bundle = await create_block_bundle(
-            session=session,
-            block_number=block_number,
+        batch_end = min(
+            batch_start
+            + BACKFILL_CONCURRENCY,
+            end_block + 1,
         )
 
-        await block_queue.put(
-            bundle
+        block_numbers = list(
+            range(
+                batch_start,
+                batch_end,
+            )
         )
 
-        BACKFILL_BLOCKS_TOTAL.inc()
-
-        BLOCK_QUEUE_SIZE.set(
-            block_queue.qsize()
+        bundles = await asyncio.gather(
+            *[
+                create_block_bundle(
+                    session=session,
+                    block_number=block_number,
+                )
+                for block_number
+                in block_numbers
+            ]
         )
 
-        completed = (
-            block_number
-            - start_block
-            + 1
-        )
+        for bundle in bundles:
+            await block_queue.put(
+                bundle
+            )
+
+            BACKFILL_BLOCKS_TOTAL.inc()
+
+            BLOCK_QUEUE_SIZE.set(
+                block_queue.qsize()
+            )
+
+            completed += 1
 
         if (
-            completed % 100 == 0
-            or block_number
-            == end_block
+            completed % 100
+            < BACKFILL_CONCURRENCY
+            or completed == total
         ):
             print(
                 "Backfill ilerlemesi "
@@ -204,35 +233,39 @@ async def backfill_blocks(
             )
 
 
-async def ingest_blocks(
+async def http_poll_fallback(
     block_queue: asyncio.Queue[
         tuple[dict, list[dict]]
     ],
     session: aiohttp.ClientSession,
     next_expected_block: int,
-) -> None:
-    async for block_header in (
-        stream_new_blocks()
+) -> int:
+    print(
+        "WebSocket kullanılamıyor. "
+        "HTTP polling fallback aktif.",
+        flush=True,
+    )
+
+    loop = asyncio.get_running_loop()
+
+    fallback_end_time = (
+        loop.time()
+        + HTTP_FALLBACK_DURATION_SECONDS
+    )
+
+    while (
+        loop.time()
+        < fallback_end_time
     ):
-        block_number = int(
-            block_header["number"],
-            16,
+        latest_block = (
+            await get_latest_block_number(
+                session
+            )
         )
 
         if (
-            block_number
-            < next_expected_block
-        ):
-            print(
-                "Eski blok atlandı "
-                f"{block_number}",
-                flush=True,
-            )
-            continue
-
-        if (
-            block_number
-            > next_expected_block
+            latest_block
+            >= next_expected_block
         ):
             await backfill_blocks(
                 block_queue=block_queue,
@@ -240,28 +273,140 @@ async def ingest_blocks(
                 start_block=(
                     next_expected_block
                 ),
-                end_block=(
-                    block_number - 1
-                ),
+                end_block=latest_block,
             )
 
-        bundle = await create_block_bundle(
-            session=session,
-            block_number=block_number,
+            next_expected_block = (
+                latest_block + 1
+            )
+
+        await asyncio.sleep(
+            HTTP_POLL_INTERVAL_SECONDS
         )
 
-        await block_queue.put(
-            bundle
-        )
+    print(
+        "HTTP polling turu tamamlandı. "
+        "WebSocket tekrar denenecek. "
+        "Beklenen blok: "
+        f"{next_expected_block}",
+        flush=True,
+    )
 
-        BLOCK_QUEUE_SIZE.set(
-            block_queue.qsize()
-        )
+    return next_expected_block
 
-        next_expected_block = (
-            block_number + 1
-        )
 
+async def ingest_blocks(
+    block_queue: asyncio.Queue[
+        tuple[dict, list[dict]]
+    ],
+    session: aiohttp.ClientSession,
+    next_expected_block: int,
+) -> None:
+    while True:
+        try:
+            print(
+                "WebSocket newHeads "
+                "bağlantısı deneniyor...",
+                flush=True,
+            )
+
+            async for block_header in (
+                stream_new_blocks()
+            ):
+                block_number = int(
+                    block_header["number"],
+                    16,
+                )
+
+                if (
+                    block_number
+                    < next_expected_block
+                ):
+                    print(
+                        "Eski blok atlandı "
+                        f"{block_number}",
+                        flush=True,
+                    )
+                    continue
+
+                if (
+                    block_number
+                    > next_expected_block
+                ):
+                    await backfill_blocks(
+                        block_queue=(
+                            block_queue
+                        ),
+                        session=session,
+                        start_block=(
+                            next_expected_block
+                        ),
+                        end_block=(
+                            block_number - 1
+                        ),
+                    )
+
+                bundle = (
+                    await create_block_bundle(
+                        session=session,
+                        block_number=(
+                            block_number
+                        ),
+                    )
+                )
+
+                await block_queue.put(
+                    bundle
+                )
+
+                BLOCK_QUEUE_SIZE.set(
+                    block_queue.qsize()
+                )
+
+                next_expected_block = (
+                    block_number + 1
+                )
+
+        except asyncio.CancelledError:
+            raise
+
+        except Exception as error:
+            print(
+                "WebSocket canlı akış "
+                "kullanılamıyor: "
+                f"{error}",
+                flush=True,
+            )
+
+            try:
+                next_expected_block = (
+                    await http_poll_fallback(
+                        block_queue=(
+                            block_queue
+                        ),
+                        session=session,
+                        next_expected_block=(
+                            next_expected_block
+                        ),
+                    )
+                )
+
+            except asyncio.CancelledError:
+                raise
+
+            except Exception as fallback_error:
+                print(
+                    "HTTP polling fallback "
+                    "sırasında hata oluştu: "
+                    f"{fallback_error}. "
+                    "5 saniye sonra tekrar "
+                    "denenecek.",
+                    flush=True,
+                )
+
+                await asyncio.sleep(
+                    5
+                )
 
 async def publish_block_bundles(
     block_queue: asyncio.Queue[
@@ -313,16 +458,19 @@ async def publish_block_bundles(
                         f"{block_number}"
                     )
 
-            await producer.send_event(
-                block_event
+            events = [
+                block_event,
+                *log_events,
+            ]
+
+            await producer.send_events(
+                events
             )
 
-            for log_event in log_events:
-                await producer.send_event(
-                    log_event
+            if log_events:
+                LOGS_PUBLISHED_TOTAL.inc(
+                    len(log_events)
                 )
-
-                LOGS_PUBLISHED_TOTAL.inc()
 
             await save_checkpoint(
                 redis_client=redis_client,

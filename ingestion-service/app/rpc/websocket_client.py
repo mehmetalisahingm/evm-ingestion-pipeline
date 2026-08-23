@@ -29,10 +29,17 @@ async def _stream_subscription(
                 ping_interval=20,
                 ping_timeout=20,
             ) as websocket:
-                params = [subscription_type]
+                params = [
+                    subscription_type
+                ]
 
-                if subscription_options is not None:
-                    params.append(subscription_options)
+                if (
+                    subscription_options
+                    is not None
+                ):
+                    params.append(
+                        subscription_options
+                    )
 
                 request = {
                     "jsonrpc": "2.0",
@@ -41,27 +48,41 @@ async def _stream_subscription(
                     "params": params,
                 }
 
-                await websocket.send(json.dumps(request))
+                await websocket.send(
+                    json.dumps(request)
+                )
 
-                response = json.loads(await websocket.recv())
+                response = json.loads(
+                    await websocket.recv()
+                )
 
                 if "error" in response:
-                    raise RuntimeError(response["error"])
+                    raise RuntimeError(
+                        response["error"]
+                    )
 
                 print(
-                    f"{subscription_type} aboneliği oluştu:",
+                    f"{subscription_type} "
+                    "aboneliği oluştu:",
                     response["result"],
+                    flush=True,
                 )
 
                 retry_number = 0
 
                 async for raw_message in websocket:
-                    message = json.loads(raw_message)
+                    message = json.loads(
+                        raw_message
+                    )
 
-                    result = message.get(
-                        "params",
-                        {},
-                    ).get("result")
+                    result = (
+                        message.get(
+                            "params",
+                            {},
+                        ).get(
+                            "result"
+                        )
+                    )
 
                     if result:
                         yield result
@@ -70,23 +91,33 @@ async def _stream_subscription(
             raise
 
         except Exception as error:
+            retry_number += 1
+
             if retry_number >= max_retries:
                 raise RuntimeError(
                     f"{subscription_type} bağlantısı "
-                    f"{max_retries} yeniden denemeden "
+                    f"{max_retries} denemeden "
                     "sonra kurulamadı."
                 ) from error
 
-            delay = calculate_backoff(retry_number)
-
-            print(
-                f"{subscription_type} bağlantısı kesildi: "
-                f"{error}\n"
-                f"{delay:.2f} saniye sonra yeniden denenecek."
+            delay = calculate_backoff(
+                retry_number - 1
             )
 
-            await asyncio.sleep(delay)
-            retry_number += 1
+            print(
+                f"{subscription_type} "
+                "bağlantısı kesildi: "
+                f"{error}\n"
+                f"{delay:.2f} saniye "
+                "sonra yeniden denenecek. "
+                f"Deneme: "
+                f"{retry_number}/{max_retries}",
+                flush=True,
+            )
+
+            await asyncio.sleep(
+                delay
+            )
 
 
 async def stream_new_blocks() -> AsyncIterator[dict]:
