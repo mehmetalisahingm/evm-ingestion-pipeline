@@ -118,6 +118,24 @@ Kontrol:
 docker exec evm-redis redis-cli GET evm:56:ingestion:checkpoint
 ```
 
+### Ingestion backpressure ve canlı hız
+
+Local geliştirme ortamında block queue sınırlıdır:
+
+```text
+BLOCK_QUEUE_MAX_SIZE=20
+```
+
+Bu sayede RPC/backfill tarafı downstream servislerden daha hızlı olsa bile ingestion RAM kullanımı sınırsız büyümez.
+
+Canlı BSC yükünde kullanılan local publish hedefi:
+
+```text
+INGESTION_TARGET_EVENTS_PER_SECOND=4000
+```
+
+Bu değer production kapasite garantisi değil, geliştirme ortamında zincirin canlı hızını yakalamak için kullanılan kontrollü bir pacing hedefidir.
+
 ---
 
 # Sprint 2 - Normalizer ve Re-org
@@ -297,8 +315,9 @@ Ek olarak:
 - Cache miss durumunda Redis fallback kullanılır
 - Redis source of truth olmaya devam eder
 - Cache yalnızca Redis transaction başarıyla tamamlandıktan sonra güncellenir
+- Re-org active window dışındaki event state'leri bounded pruning ile temizlenir
 
-Bu optimizasyonlar özellikle yoğun log trafiğinde Redis round-trip sayısını ciddi biçimde azaltır.
+Bu optimizasyonlar özellikle yoğun log trafiğinde Redis round-trip ve bellek kullanımını sınırlar.
 
 ---
 
@@ -576,6 +595,18 @@ Batch Writer'ın retry denemeleri bittikten sonra hâlâ ClickHouse'a yazılamay
 
 Parse/validation gibi nedenlerle işlenemeyen mesajlar için kullanılır.
 
+### Local Kafka disk güvenliği
+
+Uzun geliştirme testlerinde Kafka volume'unun sınırsız büyümemesi için broker default retention sınırı kullanılır:
+
+```text
+KAFKA_LOG_RETENTION_BYTES=2147483648
+KAFKA_LOG_SEGMENT_BYTES=268435456
+KAFKA_LOG_RETENTION_CHECK_INTERVAL_MS=60000
+```
+
+Mevcut topic'ler tek partition kullandığı için local ortamda varsayılan retained veri yaklaşık 2 GiB/partition ile sınırlandırılır. Production ve uzun backlog testlerinde bu değerler ayrıca kapasite planına göre ayarlanmalıdır.
+
 ---
 
 # At-Least-Once Yaklaşımı
@@ -692,7 +723,13 @@ WS_RPC_URL=
 KAFKA_BOOTSTRAP_SERVERS=localhost:9092
 REDIS_URL=redis://localhost:6379/0
 
-BLOCK_QUEUE_MAX_SIZE=500
+BLOCK_QUEUE_MAX_SIZE=20
+BACKFILL_CONCURRENCY=5
+INGESTION_TARGET_EVENTS_PER_SECOND=4000
+
+KAFKA_LOG_RETENTION_BYTES=2147483648
+KAFKA_LOG_SEGMENT_BYTES=268435456
+KAFKA_LOG_RETENTION_CHECK_INTERVAL_MS=60000
 ```
 
 `.env` Git deposuna gönderilmemelidir.
@@ -748,7 +785,7 @@ Volume'ları da silmek:
 docker compose down -v
 ```
 
-> `down -v` Redis, ClickHouse, Prometheus ve Grafana volume verilerini siler.
+> `down -v` Kafka, Redis, ClickHouse, Prometheus ve Grafana volume verilerini siler.
 
 ---
 
@@ -833,6 +870,30 @@ Proje geliştirme sırasında aşağıdaki senaryolar doğrulanmıştır:
 - Prometheus'ta beş uygulama servisinin scrape edilmesi
 - Grafana dashboard provisioning
 - Normalizer ve Re-org consumer lag performans optimizasyonları
+- Redis state'in active re-org window ile bounded tutulması
+- Ingestion queue'nun 20 block ile bounded tutulması
+- Kafka local retention ile disk kullanımının sınırlandırılması
+- Docker volume reset sonrası temiz uçtan uca başlangıç testi
+
+---
+
+# Final Kabul Testi
+
+23 Ağustos 2026 tarihli temiz volume testinde tüm ana servisler ayağa kalktı ve health check'ler başarılı oldu.
+
+Canlı akışta Normalizer ve Re-org consumer backlog'u düşük seviyede kaldı. 4000 normalized event/s ingestion hedefi uygulandıktan sonra reconciliation pipeline lag kısa süre 579 block seviyesine çıktıktan sonra 501 ve 392 block seviyelerine geriledi; bu, test penceresinde hattın zincire göre catch-up kapasitesi olduğunu gösterdi.
+
+Aynı kabul testinde örnek Kafka lag snapshot'ı:
+
+```text
+normalizer-service: 460
+reorg-service:       307
+batch-writer-service:1170
+```
+
+Bu değerler yüksek hacimli canlı BSC akışı sırasında alınmış geçici backlog snapshot'larıdır; sıfır olmak zorunda değildir. Kabul kriteri backlog'un sınırsız büyümemesi, downstream servislerin tüketmeye devam etmesi ve reconciliation'ın kontrol pencerelerinde başarılı eşleşmeler üretmesidir.
+
+ClickHouse'a block, transaction ve log kayıtlarının yazıldığı ayrıca doğrulandı.
 
 ---
 
@@ -873,6 +934,8 @@ ClickHouse
 Reconciliation ile blockchain ve ClickHouse verisi karşılaştırılabilir; Prometheus ve Grafana ile throughput, queue fullness, batch süreleri, hata oranları, missing block ve pipeline lag takip edilebilir.
 
 `evm.retry_writer` başarısız Batch Writer kayıtları için durable fallback olarak kullanılmaktadır. Ayrı bir retry-consumer servisi eklenmesi gerekirse bu topic üzerinden genişletilebilir.
+
+Sprint 1, Sprint 2 ve Sprint 3 kapsamındaki planlanan ana teslimler tamamlanmıştır.
 
 ---
 
