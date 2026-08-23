@@ -32,18 +32,17 @@ LOG_QUEUE_MAX_SIZE = int(
     os.getenv("LOG_QUEUE_MAX_SIZE", "5000")
 )
 
-# Backfill sırasında RPC'den birkaç blok paralel çekilebilir,
-# ancak Kafka'ya verilecek tahmini normalized event hızı ayrıca
-# sınırlandırılır. Böylece Re-org servisi dev catch-up sırasında
-# gereksiz yere yüz binlerce event geriye düşmez.
 BACKFILL_CONCURRENCY = int(
     os.getenv("BACKFILL_CONCURRENCY", "5")
 )
 
+# Backfill'in Normalizer/Re-org hattını boğmaması için
+# tahmini normalized event üretim hızını sınırlar.
+# Canlı WebSocket akışı bu limite tabi değildir.
 BACKFILL_TARGET_EVENTS_PER_SECOND = float(
     os.getenv(
         "BACKFILL_TARGET_EVENTS_PER_SECOND",
-        "1000",
+        "1200",
     )
 )
 
