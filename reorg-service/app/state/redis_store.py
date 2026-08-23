@@ -10,6 +10,13 @@ from app.reorg.models import (
 class RedisStateStore:
     """
     Re-org ve idempotency durumlarını Redis'te saklar.
+
+    Son canonical blokların küçük bir kopyası
+    RAM'de tutulur.
+
+    Redis source of truth olmaya devam eder.
+    Cache yalnızca Redis round-trip sayısını
+    azaltmak için kullanılır.
     """
 
     def __init__(
@@ -20,14 +27,24 @@ class RedisStateStore:
     ) -> None:
         self._redis_url = redis_url
         self._window_size = window_size
-        self._pending_ttl_seconds = pending_ttl_seconds
+        self._pending_ttl_seconds = (
+            pending_ttl_seconds
+        )
+
         self._redis: Redis | None = None
+
+        # block_hash -> StoredBlockState
+        self._block_cache_by_hash: dict[
+            tuple[int, str],
+            StoredBlockState,
+        ] = {}
 
     @property
     def client(self) -> Redis:
         if self._redis is None:
             raise RuntimeError(
-                "Redis bağlantısı henüz başlatılmadı"
+                "Redis bağlantısı henüz "
+                "başlatılmadı"
             )
 
         return self._redis
@@ -40,17 +57,32 @@ class RedisStateStore:
 
         await self._redis.ping()
 
+        # Container/service yeniden başlarsa
+        # cache boş başlar.
+        #
+        # İlk okumalar Redis'ten gelir ve
+        # cache tekrar dolar.
+        self._block_cache_by_hash.clear()
+
     async def stop(self) -> None:
+        self._block_cache_by_hash.clear()
+
         if self._redis is not None:
             await self._redis.aclose()
             self._redis = None
 
     async def ping(self) -> bool:
-        return bool(await self.client.ping())
+        return bool(
+            await self.client.ping()
+        )
 
     @staticmethod
-    def _event_key(event_id: str) -> str:
-        return f"reorg:event:{event_id}"
+    def _event_key(
+        event_id: str,
+    ) -> str:
+        return (
+            f"reorg:event:{event_id}"
+        )
 
     @staticmethod
     def _block_key(
@@ -58,7 +90,8 @@ class RedisStateStore:
         block_number: int,
     ) -> str:
         return (
-            f"reorg:block:{chain_id}:"
+            f"reorg:block:"
+            f"{chain_id}:"
             f"{block_number}"
         )
 
@@ -68,7 +101,8 @@ class RedisStateStore:
         block_hash: str,
     ) -> str:
         return (
-            f"reorg:block-hash:{chain_id}:"
+            f"reorg:block-hash:"
+            f"{chain_id}:"
             f"{block_hash.lower()}"
         )
 
@@ -78,17 +112,27 @@ class RedisStateStore:
         block_hash: str,
     ) -> str:
         return (
-            f"reorg:block-events:{chain_id}:"
+            f"reorg:block-events:"
+            f"{chain_id}:"
             f"{block_hash.lower()}"
         )
 
     @staticmethod
-    def _head_key(chain_id: int) -> str:
-        return f"reorg:head:{chain_id}"
+    def _head_key(
+        chain_id: int,
+    ) -> str:
+        return (
+            f"reorg:head:{chain_id}"
+        )
 
     @staticmethod
-    def _block_index_key(chain_id: int) -> str:
-        return f"reorg:block-index:{chain_id}"
+    def _block_index_key(
+        chain_id: int,
+    ) -> str:
+        return (
+            f"reorg:block-index:"
+            f"{chain_id}"
+        )
 
     @staticmethod
     def _pending_key(
@@ -96,23 +140,114 @@ class RedisStateStore:
         block_hash: str,
     ) -> str:
         return (
-            f"reorg:pending:{chain_id}:"
+            f"reorg:pending:"
+            f"{chain_id}:"
             f"{block_hash.lower()}"
         )
+
+    @staticmethod
+    def _cache_key(
+        chain_id: int,
+        block_hash: str,
+    ) -> tuple[int, str]:
+        return (
+            chain_id,
+            block_hash.lower(),
+        )
+
+    def _cache_block_state(
+        self,
+        state: StoredBlockState,
+    ) -> None:
+        """
+        Başarıyla Redis'e yazılmış bir
+        block state'i RAM cache'e koyar.
+        """
+
+        key = self._cache_key(
+            state.chain_id,
+            state.block_hash,
+        )
+
+        self._block_cache_by_hash[
+            key
+        ] = state
+
+    def _remove_cached_block_state(
+        self,
+        state: StoredBlockState,
+    ) -> None:
+        key = self._cache_key(
+            state.chain_id,
+            state.block_hash,
+        )
+
+        self._block_cache_by_hash.pop(
+            key,
+            None,
+        )
+
+    def _prune_block_cache(
+        self,
+        *,
+        chain_id: int,
+        head_block_number: int,
+    ) -> None:
+        """
+        Redis re-org window'ı dışında kalan
+        blokları RAM cache'den temizler.
+        """
+
+        cutoff = (
+            head_block_number
+            - self._window_size
+        )
+
+        if cutoff < 0:
+            return
+
+        keys_to_remove: list[
+            tuple[int, str]
+        ] = []
+
+        for (
+            cache_key,
+            state,
+        ) in self._block_cache_by_hash.items():
+            if (
+                state.chain_id
+                == chain_id
+                and state.block_number
+                <= cutoff
+            ):
+                keys_to_remove.append(
+                    cache_key
+                )
+
+        for cache_key in keys_to_remove:
+            self._block_cache_by_hash.pop(
+                cache_key,
+                None,
+            )
 
     async def get_event_state(
         self,
         event_id: str,
     ) -> StoredEventState | None:
         raw_state = await self.client.get(
-            self._event_key(event_id)
+            self._event_key(
+                event_id
+            )
         )
 
         if raw_state is None:
             return None
 
-        return StoredEventState.model_validate_json(
-            raw_state
+        return (
+            StoredEventState
+            .model_validate_json(
+                raw_state
+            )
         )
 
     async def save_event_state(
@@ -120,8 +255,9 @@ class RedisStateStore:
         state: StoredEventState,
     ) -> None:
         """
-        Event'in son durumunu saklar ve event'i ait olduğu
-        blokla ilişkilendirir.
+        Event'in son durumunu saklar ve
+        event'i ait olduğu blokla
+        ilişkilendirir.
         """
 
         event = state.event
@@ -131,7 +267,9 @@ class RedisStateStore:
         )
 
         pipeline.set(
-            self._event_key(event.event_id),
+            self._event_key(
+                event.event_id
+            ),
             state.model_dump_json(),
         )
 
@@ -151,14 +289,16 @@ class RedisStateStore:
         block_hash: str,
     ) -> list[StoredEventState]:
         """
-        Belirtilen bloğa ait bütün event durumlarını getirir.
-        Re-org sırasında bunlar canonical=false yapılacaktır.
+        Belirtilen bloğa ait bütün event
+        durumlarını getirir.
         """
 
-        event_ids = await self.client.smembers(
-            self._block_events_key(
-                chain_id,
-                block_hash,
+        event_ids = (
+            await self.client.smembers(
+                self._block_events_key(
+                    chain_id,
+                    block_hash,
+                )
             )
         )
 
@@ -166,8 +306,11 @@ class RedisStateStore:
             return []
 
         event_keys = [
-            self._event_key(event_id)
-            for event_id in event_ids
+            self._event_key(
+                event_id
+            )
+            for event_id
+            in event_ids
         ]
 
         raw_states = await self.client.mget(
@@ -175,10 +318,12 @@ class RedisStateStore:
         )
 
         return [
-            StoredEventState.model_validate_json(
+            StoredEventState
+            .model_validate_json(
                 raw_state
             )
-            for raw_state in raw_states
+            for raw_state
+            in raw_states
             if raw_state is not None
         ]
 
@@ -197,19 +342,60 @@ class RedisStateStore:
         if raw_state is None:
             return None
 
-        return StoredBlockState.model_validate_json(
-            raw_state
+        state = (
+            StoredBlockState
+            .model_validate_json(
+                raw_state
+            )
         )
+
+        # Redis'ten bulunan canonical
+        # block state'i cache'e de koy.
+        self._cache_block_state(
+            state
+        )
+
+        return state
 
     async def get_block_by_hash(
         self,
         chain_id: int,
         block_hash: str,
     ) -> StoredBlockState | None:
-        block_number = await self.client.get(
-            self._block_hash_key(
-                chain_id,
-                block_hash,
+        """
+        Önce RAM cache'e bakar.
+
+        Cache hit olduğunda Redis'e hiç
+        gitmeden block state döner.
+
+        Cache miss durumunda eski Redis
+        davranışına fallback yapılır.
+        """
+
+        normalized_hash = (
+            block_hash.lower()
+        )
+
+        cache_key = self._cache_key(
+            chain_id,
+            normalized_hash,
+        )
+
+        cached_state = (
+            self._block_cache_by_hash.get(
+                cache_key
+            )
+        )
+
+        if cached_state is not None:
+            return cached_state
+
+        block_number = (
+            await self.client.get(
+                self._block_hash_key(
+                    chain_id,
+                    normalized_hash,
+                )
             )
         )
 
@@ -218,14 +404,23 @@ class RedisStateStore:
 
         state = await self.get_block_state(
             chain_id=chain_id,
-            block_number=int(block_number),
+            block_number=int(
+                block_number
+            ),
         )
 
         if state is None:
             return None
 
-        if state.block_hash.lower() != block_hash.lower():
+        if (
+            state.block_hash.lower()
+            != normalized_hash
+        ):
             return None
+
+        self._cache_block_state(
+            state
+        )
 
         return state
 
@@ -233,14 +428,13 @@ class RedisStateStore:
         self,
         state: StoredBlockState,
     ) -> None:
-        """
-        Canonical blok durumunu, hash indeksini ve blok
-        numarası indeksini birlikte saklar.
-        """
-
-        existing_state = await self.get_block_state(
-            chain_id=state.chain_id,
-            block_number=state.block_number,
+        existing_state = (
+            await self.get_block_state(
+                chain_id=state.chain_id,
+                block_number=(
+                    state.block_number
+                ),
+            )
         )
 
         pipeline = self.client.pipeline(
@@ -249,7 +443,8 @@ class RedisStateStore:
 
         if (
             existing_state is not None
-            and existing_state.block_hash.lower()
+            and
+            existing_state.block_hash.lower()
             != state.block_hash.lower()
         ):
             pipeline.delete(
@@ -272,31 +467,47 @@ class RedisStateStore:
                 state.chain_id,
                 state.block_hash,
             ),
-            str(state.block_number),
+            str(
+                state.block_number
+            ),
         )
 
         pipeline.zadd(
-            self._block_index_key(state.chain_id),
+            self._block_index_key(
+                state.chain_id
+            ),
             {
-                str(state.block_number): float(
+                str(
+                    state.block_number
+                ): float(
                     state.block_number
                 )
             },
         )
 
+        # Önce Redis.
         await pipeline.execute()
+
+        # Redis başarılı olduktan sonra
+        # cache değişir.
+        if (
+            existing_state is not None
+            and
+            existing_state.block_hash.lower()
+            != state.block_hash.lower()
+        ):
+            self._remove_cached_block_state(
+                existing_state
+            )
+
+        self._cache_block_state(
+            state
+        )
 
     async def remove_block_state(
         self,
         state: StoredBlockState,
     ) -> None:
-        """
-        Bloğu canonical blok indeksinden kaldırır.
-
-        Event durumları silinmez; re-org sırasında onların
-        canonical=false sürümleri oluşturulacaktır.
-        """
-
         pipeline = self.client.pipeline(
             transaction=True
         )
@@ -316,34 +527,68 @@ class RedisStateStore:
         )
 
         pipeline.zrem(
-            self._block_index_key(state.chain_id),
-            str(state.block_number),
+            self._block_index_key(
+                state.chain_id
+            ),
+            str(
+                state.block_number
+            ),
         )
 
         await pipeline.execute()
+
+        # Redis silme başarılıysa cache'den
+        # de kaldır.
+        self._remove_cached_block_state(
+            state
+        )
 
     async def get_head(
         self,
         chain_id: int,
     ) -> StoredBlockState | None:
         raw_state = await self.client.get(
-            self._head_key(chain_id)
+            self._head_key(
+                chain_id
+            )
         )
 
         if raw_state is None:
             return None
 
-        return StoredBlockState.model_validate_json(
-            raw_state
+        state = (
+            StoredBlockState
+            .model_validate_json(
+                raw_state
+            )
         )
+
+        self._cache_block_state(
+            state
+        )
+
+        return state
 
     async def set_head(
         self,
         state: StoredBlockState,
     ) -> None:
         await self.client.set(
-            self._head_key(state.chain_id),
+            self._head_key(
+                state.chain_id
+            ),
             state.model_dump_json(),
+        )
+
+        self._cache_block_state(
+            state
+        )
+
+        self._prune_block_cache(
+            chain_id=state.chain_id,
+            head_block_number=(
+                state.block_number
+            ),
         )
 
     async def delete_head(
@@ -351,7 +596,9 @@ class RedisStateStore:
         chain_id: int,
     ) -> None:
         await self.client.delete(
-            self._head_key(chain_id)
+            self._head_key(
+                chain_id
+            )
         )
 
     async def get_blocks_after(
@@ -359,15 +606,14 @@ class RedisStateStore:
         chain_id: int,
         block_number: int,
     ) -> list[StoredBlockState]:
-        """
-        Verilen blok numarasından sonraki canonical blokları
-        küçükten büyüğe getirir.
-        """
-
-        block_numbers = await self.client.zrangebyscore(
-            self._block_index_key(chain_id),
-            block_number + 1,
-            "+inf",
+        block_numbers = (
+            await self.client.zrangebyscore(
+                self._block_index_key(
+                    chain_id
+                ),
+                block_number + 1,
+                "+inf",
+            )
         )
 
         if not block_numbers:
@@ -375,7 +621,8 @@ class RedisStateStore:
 
         ordered_numbers = sorted(
             int(number)
-            for number in block_numbers
+            for number
+            in block_numbers
         )
 
         block_keys = [
@@ -383,29 +630,37 @@ class RedisStateStore:
                 chain_id,
                 number,
             )
-            for number in ordered_numbers
+            for number
+            in ordered_numbers
         ]
 
-        raw_states = await self.client.mget(
-            block_keys
+        raw_states = (
+            await self.client.mget(
+                block_keys
+            )
         )
 
-        return [
-            StoredBlockState.model_validate_json(
+        states = [
+            StoredBlockState
+            .model_validate_json(
                 raw_state
             )
-            for raw_state in raw_states
+            for raw_state
+            in raw_states
             if raw_state is not None
         ]
 
+        for state in states:
+            self._cache_block_state(
+                state
+            )
 
-
+        return states
 
     async def add_pending_event(
         self,
         event: NormalizedEvent,
     ) -> None:
-
         pending_key = self._pending_key(
             event.chain_id,
             event.block_hash,
@@ -433,22 +688,22 @@ class RedisStateStore:
         chain_id: int,
         block_hash: str,
     ) -> list[NormalizedEvent]:
-        """
-        Bekleyen event'leri silmeden getirir.
-        """
-
-        raw_events = await self.client.hvals(
-            self._pending_key(
-                chain_id,
-                block_hash,
+        raw_events = (
+            await self.client.hvals(
+                self._pending_key(
+                    chain_id,
+                    block_hash,
+                )
             )
         )
 
         return [
-            NormalizedEvent.model_validate_json(
+            NormalizedEvent
+            .model_validate_json(
                 raw_event
             )
-            for raw_event in raw_events
+            for raw_event
+            in raw_events
         ]
 
     async def delete_pending_events(
@@ -456,11 +711,6 @@ class RedisStateStore:
         chain_id: int,
         block_hash: str,
     ) -> None:
-        """
-        Kafka gönderimleri başarıyla tamamlandıktan sonra
-        pending event'leri siler.
-        """
-
         await self.client.delete(
             self._pending_key(
                 chain_id,
@@ -474,8 +724,11 @@ class RedisStateStore:
         head_block_number: int,
     ) -> int:
         """
-        Redis'te yalnızca son N canonical bloğu tutar.
-        Event idempotency kayıtları korunur.
+        Redis'te yalnızca son N canonical
+        bloğu tutar.
+
+        Event idempotency kayıtları
+        korunur.
         """
 
         cutoff = (
@@ -486,25 +739,46 @@ class RedisStateStore:
         if cutoff < 0:
             return 0
 
-        old_block_numbers = await self.client.zrangebyscore(
-            self._block_index_key(chain_id),
-            "-inf",
-            cutoff,
+        old_block_numbers = (
+            await self.client.zrangebyscore(
+                self._block_index_key(
+                    chain_id
+                ),
+                "-inf",
+                cutoff,
+            )
         )
 
         if not old_block_numbers:
+            self._prune_block_cache(
+                chain_id=chain_id,
+                head_block_number=(
+                    head_block_number
+                ),
+            )
+
             return 0
 
-        old_states: list[StoredBlockState] = []
+        old_states: list[
+            StoredBlockState
+        ] = []
 
-        for block_number in old_block_numbers:
-            state = await self.get_block_state(
-                chain_id=chain_id,
-                block_number=int(block_number),
+        for block_number in (
+            old_block_numbers
+        ):
+            state = (
+                await self.get_block_state(
+                    chain_id=chain_id,
+                    block_number=int(
+                        block_number
+                    ),
+                )
             )
 
             if state is not None:
-                old_states.append(state)
+                old_states.append(
+                    state
+                )
 
         pipeline = self.client.pipeline(
             transaction=True
@@ -536,28 +810,61 @@ class RedisStateStore:
                 self._block_index_key(
                     state.chain_id
                 ),
-                str(state.block_number),
+                str(
+                    state.block_number
+                ),
             )
 
         await pipeline.execute()
 
-        return len(old_states)
+        # Redis prune başarılı olduktan
+        # sonra RAM cache prune edilir.
+        for state in old_states:
+            self._remove_cached_block_state(
+                state
+            )
+
+        self._prune_block_cache(
+            chain_id=chain_id,
+            head_block_number=(
+                head_block_number
+            ),
+        )
+
+        return len(
+            old_states
+        )
 
     async def apply_changes(
         self,
         *,
-        event_states: list[StoredEventState],
-        block_states_to_save: list[StoredBlockState],
-        block_states_to_remove: list[StoredBlockState],
-        head_state: StoredBlockState | None,
-        pending_events_to_add: list[NormalizedEvent],
+        event_states: list[
+            StoredEventState
+        ],
+        block_states_to_save: list[
+            StoredBlockState
+        ],
+        block_states_to_remove: list[
+            StoredBlockState
+        ],
+        head_state: (
+            StoredBlockState | None
+        ),
+        pending_events_to_add: list[
+            NormalizedEvent
+        ],
         pending_keys_to_delete: list[
             tuple[int, str]
         ],
     ) -> None:
         """
-        Re-org işleminden oluşan tüm Redis değişikliklerini
-        tek transaction içinde uygular.
+        Re-org işleminden oluşan tüm Redis
+        değişikliklerini tek transaction
+        içinde uygular.
+
+        Cache yalnızca Redis transaction
+        başarıyla tamamlandıktan sonra
+        güncellenir.
         """
 
         pipeline = self.client.pipeline(
@@ -568,7 +875,9 @@ class RedisStateStore:
             event = state.event
 
             pipeline.set(
-                self._event_key(event.event_id),
+                self._event_key(
+                    event.event_id
+                ),
                 state.model_dump_json(),
             )
 
@@ -580,7 +889,9 @@ class RedisStateStore:
                 event.event_id,
             )
 
-        for state in block_states_to_remove:
+        for state in (
+            block_states_to_remove
+        ):
             pipeline.delete(
                 self._block_key(
                     state.chain_id,
@@ -599,10 +910,14 @@ class RedisStateStore:
                 self._block_index_key(
                     state.chain_id
                 ),
-                str(state.block_number),
+                str(
+                    state.block_number
+                ),
             )
 
-        for state in block_states_to_save:
+        for state in (
+            block_states_to_save
+        ):
             pipeline.set(
                 self._block_key(
                     state.chain_id,
@@ -616,7 +931,9 @@ class RedisStateStore:
                     state.chain_id,
                     state.block_hash,
                 ),
-                str(state.block_number),
+                str(
+                    state.block_number
+                ),
             )
 
             pipeline.zadd(
@@ -624,16 +941,22 @@ class RedisStateStore:
                     state.chain_id
                 ),
                 {
-                    str(state.block_number): float(
+                    str(
+                        state.block_number
+                    ): float(
                         state.block_number
                     )
                 },
             )
 
-        for event in pending_events_to_add:
-            pending_key = self._pending_key(
-                event.chain_id,
-                event.block_hash,
+        for event in (
+            pending_events_to_add
+        ):
+            pending_key = (
+                self._pending_key(
+                    event.chain_id,
+                    event.block_hash,
+                )
             )
 
             pipeline.hset(
@@ -647,7 +970,10 @@ class RedisStateStore:
                 self._pending_ttl_seconds,
             )
 
-        for chain_id, block_hash in pending_keys_to_delete:
+        for (
+            chain_id,
+            block_hash,
+        ) in pending_keys_to_delete:
             pipeline.delete(
                 self._pending_key(
                     chain_id,
@@ -663,4 +989,38 @@ class RedisStateStore:
                 head_state.model_dump_json(),
             )
 
+        # BURASI KRİTİK:
+        #
+        # Önce bütün değişiklikler Redis'te
+        # başarılı olmalı.
         await pipeline.execute()
+
+        # Redis başarılı olduktan sonra
+        # cache güncellenebilir.
+        for state in (
+            block_states_to_remove
+        ):
+            self._remove_cached_block_state(
+                state
+            )
+
+        for state in (
+            block_states_to_save
+        ):
+            self._cache_block_state(
+                state
+            )
+
+        if head_state is not None:
+            self._cache_block_state(
+                head_state
+            )
+
+            self._prune_block_cache(
+                chain_id=(
+                    head_state.chain_id
+                ),
+                head_block_number=(
+                    head_state.block_number
+                ),
+            )

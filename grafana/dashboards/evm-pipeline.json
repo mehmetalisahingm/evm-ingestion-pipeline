@@ -1,0 +1,487 @@
+{
+  "annotations": {
+    "list": []
+  },
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 1,
+  "id": null,
+  "links": [],
+  "liveNow": true,
+  "panels": [
+    {
+      "datasource": "Prometheus",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 0,
+        "y": 0
+      },
+      "id": 1,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "auto"
+      },
+      "targets": [
+        {
+          "expr": "sum(up{job=~\"ingestion|normalizer|reorg|batch-writer|reconciliation\"})",
+          "legendFormat": "Healthy Services",
+          "refId": "A"
+        }
+      ],
+      "title": "Healthy Services / 5",
+      "type": "stat"
+    },
+    {
+      "datasource": "Prometheus",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 6,
+        "y": 0
+      },
+      "id": 2,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "auto"
+      },
+      "targets": [
+        {
+          "expr": "evm_reconciliation_pipeline_lag_blocks",
+          "legendFormat": "Pipeline Lag",
+          "refId": "A"
+        }
+      ],
+      "title": "Pipeline Lag (Blocks)",
+      "type": "stat"
+    },
+    {
+      "datasource": "Prometheus",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "rows"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 12,
+        "y": 0
+      },
+      "id": 3,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "auto"
+      },
+      "targets": [
+        {
+          "expr": "sum(evm_clickhouse_written_rows_total)",
+          "legendFormat": "Written Rows",
+          "refId": "A"
+        }
+      ],
+      "title": "ClickHouse Written Rows",
+      "type": "stat"
+    },
+    {
+      "datasource": "Prometheus",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 18,
+        "y": 0
+      },
+      "id": 4,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "auto"
+      },
+      "targets": [
+        {
+          "expr": "evm_reconciliation_missing_blocks",
+          "legendFormat": "Missing Blocks",
+          "refId": "A"
+        }
+      ],
+      "title": "Missing Blocks",
+      "type": "stat"
+    },
+    {
+      "datasource": "Prometheus",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 4
+      },
+      "id": 5,
+      "options": {
+        "legend": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "expr": "rate(evm_blocks_published_total[1m])",
+          "legendFormat": "Blocks / sec",
+          "refId": "A"
+        },
+        {
+          "expr": "rate(evm_logs_published_total[1m])",
+          "legendFormat": "Logs / sec",
+          "refId": "B"
+        },
+        {
+          "expr": "sum(rate(evm_normalizer_events_total[1m]))",
+          "legendFormat": "Normalized Events / sec",
+          "refId": "C"
+        },
+        {
+          "expr": "rate(reorg_canonical_events_total[1m])",
+          "legendFormat": "Canonical Events / sec",
+          "refId": "D"
+        },
+        {
+          "expr": "sum(rate(evm_clickhouse_written_rows_total[1m]))",
+          "legendFormat": "ClickHouse Rows / sec",
+          "refId": "E"
+        }
+      ],
+      "title": "Live Pipeline Throughput",
+      "type": "timeseries"
+    },
+    {
+      "datasource": "Prometheus",
+      "fieldConfig": {
+        "defaults": {
+          "max": 100,
+          "min": 0,
+          "unit": "percent"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 4
+      },
+      "id": 6,
+      "options": {
+        "legend": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "expr": "100 * evm_block_queue_size / 500",
+          "legendFormat": "Ingestion Block Queue %",
+          "refId": "A"
+        },
+        {
+          "expr": "100 * evm_batch_buffer_size / 2000",
+          "legendFormat": "Batch Buffer %",
+          "refId": "B"
+        }
+      ],
+      "title": "Queue / Buffer Fullness",
+      "type": "timeseries"
+    },
+    {
+      "datasource": "Prometheus",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 12
+      },
+      "id": 7,
+      "options": {
+        "legend": {
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ],
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.50, sum(rate(evm_batch_flush_duration_seconds_bucket[5m])) by (le))",
+          "legendFormat": "p50",
+          "refId": "A"
+        },
+        {
+          "expr": "histogram_quantile(0.95, sum(rate(evm_batch_flush_duration_seconds_bucket[5m])) by (le))",
+          "legendFormat": "p95",
+          "refId": "B"
+        },
+        {
+          "expr": "histogram_quantile(0.99, sum(rate(evm_batch_flush_duration_seconds_bucket[5m])) by (le))",
+          "legendFormat": "p99",
+          "refId": "C"
+        }
+      ],
+      "title": "ClickHouse Batch Flush Duration",
+      "type": "timeseries"
+    },
+    {
+      "datasource": "Prometheus",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 12
+      },
+      "id": 8,
+      "options": {
+        "legend": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "expr": "sum(rate(evm_normalizer_processing_errors_total[5m]))",
+          "legendFormat": "Normalizer Errors / sec",
+          "refId": "A"
+        },
+        {
+          "expr": "rate(reorg_processing_errors_total[5m])",
+          "legendFormat": "Re-org Errors / sec",
+          "refId": "B"
+        },
+        {
+          "expr": "rate(evm_batch_writer_processing_errors_total[5m])",
+          "legendFormat": "Batch Writer Errors / sec",
+          "refId": "C"
+        },
+        {
+          "expr": "rate(evm_reconciliation_errors_total[5m])",
+          "legendFormat": "Reconciliation Errors / sec",
+          "refId": "D"
+        }
+      ],
+      "title": "Service Error Rates",
+      "type": "timeseries"
+    },
+    {
+      "datasource": "Prometheus",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 20
+      },
+      "id": 9,
+      "options": {
+        "legend": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "expr": "evm_reconciliation_expected_logs",
+          "legendFormat": "Expected Logs",
+          "refId": "A"
+        },
+        {
+          "expr": "evm_reconciliation_actual_logs",
+          "legendFormat": "Actual Logs",
+          "refId": "B"
+        }
+      ],
+      "title": "Reconciliation Logs",
+      "type": "timeseries"
+    },
+    {
+      "datasource": "Prometheus",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 20
+      },
+      "id": 10,
+      "options": {
+        "legend": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "expr": "evm_reconciliation_expected_blocks",
+          "legendFormat": "Expected Blocks",
+          "refId": "A"
+        },
+        {
+          "expr": "evm_reconciliation_actual_blocks",
+          "legendFormat": "Actual Blocks",
+          "refId": "B"
+        }
+      ],
+      "title": "Reconciliation Blocks",
+      "type": "timeseries"
+    }
+  ],
+  "refresh": "5s",
+  "schemaVersion": 39,
+  "tags": [
+    "evm",
+    "kafka",
+    "clickhouse",
+    "pipeline"
+  ],
+  "templating": {
+    "list": []
+  },
+  "time": {
+    "from": "now-15m",
+    "to": "now"
+  },
+  "timepicker": {},
+  "timezone": "browser",
+  "title": "EVM Ingestion Pipeline",
+  "uid": "evm-pipeline",
+  "version": 1,
+  "weekStart": ""
+}

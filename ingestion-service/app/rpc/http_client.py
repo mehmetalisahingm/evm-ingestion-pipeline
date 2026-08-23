@@ -1,4 +1,5 @@
 import asyncio
+from typing import Any
 
 import aiohttp
 
@@ -13,7 +14,9 @@ async def rpc_call(
     max_retries: int = 5,
 ):
     if not HTTP_RPC_URL:
-        raise RuntimeError("HTTP_RPC_URL .env dosyasında bulunamadı.")
+        raise RuntimeError(
+            "HTTP_RPC_URL .env dosyasında bulunamadı."
+        )
 
     payload = {
         "jsonrpc": "2.0",
@@ -31,7 +34,9 @@ async def rpc_call(
         ) as response:
 
             if response.status == 429:
-                retry_after = response.headers.get("Retry-After")
+                retry_after = response.headers.get(
+                    "Retry-After"
+                )
 
             else:
                 response.raise_for_status()
@@ -39,32 +44,43 @@ async def rpc_call(
                 data = await response.json()
 
                 if "error" in data:
-                    raise RuntimeError(data["error"])
+                    raise RuntimeError(
+                        data["error"]
+                    )
 
                 return data["result"]
 
         if retry_number == max_retries:
             raise RuntimeError(
-                "HTTP isteği 5 yeniden denemeden sonra başarısız oldu."
+                "HTTP isteği 5 yeniden denemeden "
+                "sonra başarısız oldu."
             )
 
         try:
             delay = (
                 float(retry_after)
                 if retry_after
-                else calculate_backoff(retry_number)
+                else calculate_backoff(
+                    retry_number
+                )
             )
         except ValueError:
-            delay = calculate_backoff(retry_number)
+            delay = calculate_backoff(
+                retry_number
+            )
 
         print(
             f"HTTP 429 alındı. "
-            f"{delay:.2f} saniye sonra yeniden denenecek."
+            f"{delay:.2f} saniye sonra "
+            "yeniden denenecek."
         )
 
         await asyncio.sleep(delay)
 
-    raise RuntimeError("HTTP isteği tamamlanamadı.")
+    raise RuntimeError(
+        "HTTP isteği tamamlanamadı."
+    )
+
 
 async def get_block_by_number(
     session: aiohttp.ClientSession,
@@ -73,11 +89,16 @@ async def get_block_by_number(
 ) -> dict:
     block_number_hex = hex(block_number)
 
-    for retry_number in range(max_retries + 1):
+    for retry_number in range(
+        max_retries + 1
+    ):
         block = await rpc_call(
             session=session,
             method="eth_getBlockByNumber",
-            params=[block_number_hex, True],
+            params=[
+                block_number_hex,
+                True,
+            ],
         )
 
         if block is not None:
@@ -92,25 +113,52 @@ async def get_block_by_number(
         )
 
         print(
-            f"{block_number} numaralı blok HTTP tarafında henüz hazır değil. "
-            f"{delay:.2f} saniye sonra tekrar denenecek."
+            f"{block_number} numaralı blok "
+            "HTTP tarafında henüz hazır değil. "
+            f"{delay:.2f} saniye sonra "
+            "tekrar denenecek."
         )
 
         await asyncio.sleep(delay)
 
     raise RuntimeError(
         f"{block_number} numaralı blok "
-        f"{max_retries} yeniden denemeden sonra bulunamadı."
+        f"{max_retries} yeniden denemeden "
+        "sonra bulunamadı."
     )
 
-async def get_latest_block_number(
-        session:aiohttp.ClientSession,
 
-)-> int:
-    block_number_hex= await rpc_call(
+async def get_block_receipts(
+    session: aiohttp.ClientSession,
+    block_number: int,
+) -> list[dict[str, Any]]:
+    result = await rpc_call(
+        session=session,
+        method="eth_getBlockReceipts",
+        params=[
+            hex(block_number),
+        ],
+    )
+
+    if not isinstance(result, list):
+        raise RuntimeError(
+            "eth_getBlockReceipts sonucu "
+            "liste değil."
+        )
+
+    return result
+
+
+async def get_latest_block_number(
+    session: aiohttp.ClientSession,
+) -> int:
+    block_number_hex = await rpc_call(
         session=session,
         method="eth_blockNumber",
         params=[],
     )
 
-    return int(block_number_hex,16)
+    return int(
+        block_number_hex,
+        16,
+    )

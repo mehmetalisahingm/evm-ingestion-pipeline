@@ -96,6 +96,14 @@ services:
         --partitions 1 \
         --replication-factor 1
 
+      /opt/kafka/bin/kafka-topics.sh \
+        --bootstrap-server kafka:19092 \
+        --create \
+        --if-not-exists \
+        --topic evm.retry_writer \
+        --partitions 1 \
+        --replication-factor 1
+
       echo "Kafka topic'leri hazır."
 
     restart: "no"
@@ -145,6 +153,18 @@ services:
     volumes:
       - clickhouse_data:/var/lib/clickhouse
       - ./docker/clickhouse/init:/docker-entrypoint-initdb.d:ro
+
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - >
+          wget --no-verbose --tries=1
+          --spider http://localhost:8123/ping
+          || exit 1
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 15s
 
     restart: unless-stopped
 
@@ -225,9 +245,12 @@ services:
 
     restart: unless-stopped
 
+
   reorg:
     build:
       context: ./reorg-service
+      dockerfile: Dockerfile
+
     container_name: evm-reorg
 
     environment:
@@ -255,22 +278,154 @@ services:
     ports:
       - "8002:8002"
 
-    restart: unless-stopped
-
     healthcheck:
       test:
-        [
-          "CMD",
-          "python",
-          "-c",
-          "import urllib.request; urllib.request.urlopen('http://localhost:8002/health')"
-        ]
+        - CMD
+        - python
+        - -c
+        - "import urllib.request; urllib.request.urlopen('http://localhost:8002/health', timeout=3)"
       interval: 10s
       timeout: 5s
       retries: 5
       start_period: 10s
 
+    restart: unless-stopped
+
+
+  batch-writer:
+    build:
+      context: ./batch-writer-service
+      dockerfile: Dockerfile
+
+    container_name: evm-batch-writer
+
+    environment:
+      KAFKA_BOOTSTRAP_SERVERS: kafka:19092
+      KAFKA_CANONICAL_TOPIC: canonical-events
+      KAFKA_RETRY_WRITER_TOPIC: evm.retry_writer
+      KAFKA_DLQ_TOPIC: evm.dlq
+
+      BATCH_WRITER_CONSUMER_GROUP: batch-writer-service
+      BATCH_WRITER_BATCH_SIZE: 2000
+      BATCH_WRITER_FLUSH_INTERVAL_SECONDS: 3
+
+      CLICKHOUSE_URL: http://clickhouse:8123
+      CLICKHOUSE_DATABASE: evm
+      CLICKHOUSE_USER: evm_userMehmet
+      CLICKHOUSE_PASSWORD: evm_passMehmet
+
+      BATCH_WRITER_MONITORING_PORT: 8003
+
+    depends_on:
+      kafka-init:
+        condition: service_completed_successfully
+      clickhouse:
+        condition: service_healthy
+
+    ports:
+      - "8003:8003"
+
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request; urllib.request.urlopen('http://localhost:8003/health', timeout=3)"
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+
+    restart: unless-stopped
+
+
+  reconciliation:
+    build:
+      context: ./reconciliation-service
+      dockerfile: Dockerfile
+
+    container_name: evm-reconciliation
+
+    env_file:
+      - .env
+
+    environment:
+      CHAIN_ID: 56
+
+      CLICKHOUSE_URL: http://clickhouse:8123
+      CLICKHOUSE_DATABASE: evm
+      CLICKHOUSE_USER: evm_userMehmet
+      CLICKHOUSE_PASSWORD: evm_passMehmet
+
+      RECONCILIATION_INTERVAL_SECONDS: 30
+      RECONCILIATION_WINDOW_SIZE: 20
+      RECONCILIATION_MONITORING_PORT: 8004
+
+    depends_on:
+      clickhouse:
+        condition: service_healthy
+
+    ports:
+      - "8004:8004"
+
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request; urllib.request.urlopen('http://localhost:8004/health', timeout=3)"
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+
+    restart: unless-stopped
+
+
+  prometheus:
+    image: prom/prometheus:v3.5.0
+    container_name: evm-prometheus
+
+    ports:
+      - "9090:9090"
+
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.path=/prometheus"
+      - "--web.enable-lifecycle"
+
+    restart: unless-stopped
+
+
+  grafana:
+    image: grafana/grafana:latest
+    container_name: evm-grafana
+
+    ports:
+      - "3000:3000"
+
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: admin
+      GF_USERS_ALLOW_SIGN_UP: "false"
+
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
+
+    depends_on:
+      - prometheus
+
+    restart: unless-stopped
+
 
 volumes:
   redis_data:
   clickhouse_data:
+  prometheus_data:
+  grafana_data:
