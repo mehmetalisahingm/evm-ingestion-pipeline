@@ -39,6 +39,13 @@ services:
 
       KAFKA_LOG_DIRS: /tmp/kraft-combined-logs
 
+      # Local development disk safety. All current topics use one partition,
+      # so the default 2 GiB cap limits retained data per topic partition.
+      # Increase these values for production or long-running backlog tests.
+      KAFKA_LOG_RETENTION_BYTES: ${KAFKA_LOG_RETENTION_BYTES:-2147483648}
+      KAFKA_LOG_SEGMENT_BYTES: ${KAFKA_LOG_SEGMENT_BYTES:-268435456}
+      KAFKA_LOG_RETENTION_CHECK_INTERVAL_MS: ${KAFKA_LOG_RETENTION_CHECK_INTERVAL_MS:-60000}
+
       KAFKA_LISTENERS: >-
         INTERNAL://0.0.0.0:19092,
         EXTERNAL://0.0.0.0:9092,
